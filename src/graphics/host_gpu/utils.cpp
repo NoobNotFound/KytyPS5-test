@@ -26,8 +26,8 @@ std::vector<ImageBufferCopy> MakeLayeredImageBufferCopies(uint32_t layers, uint6
                                                           uint32_t pitch, uint32_t width,
                                                           uint32_t           height,
                                                           VkImageAspectFlags aspect) {
-	if (layers == 0 || slice_size == 0 || slice_size > UINT32_MAX ||
-	    slice_size > UINT32_MAX / layers || pitch < width || width == 0 || height == 0) {
+	if (layers == 0 || slice_size == 0 || slice_size > UINT32_MAX / layers || pitch < width ||
+	    width == 0 || height == 0) {
 		EXIT("invalid layered image-buffer copy layout\n");
 	}
 	std::vector<ImageBufferCopy> regions(layers);

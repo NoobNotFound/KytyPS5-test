@@ -166,13 +166,11 @@ void Tiler::DetileStencil(GraphicContext* ctx, DepthStencilVulkanImage* image,
 }
 
 void Tiler::TileImage(void* dst, const void* src, const RenderTargetInfo& info) const {
-	const bool supported_element = info.bytes_per_element == 1 || info.bytes_per_element == 2 ||
-	                               info.bytes_per_element == 4 || info.bytes_per_element == 8;
 	if (dst == nullptr || src == nullptr || info.address == 0 || info.size == 0 ||
 	    info.width == 0 || info.height == 0 || info.pitch < info.width ||
 	    info.tile_mode != Prospero::GpuEnumValue(Prospero::TileMode::kRenderTarget) ||
 	    info.levels != 1 || info.layers == 0 || info.size % info.layers != 0 ||
-	    !supported_element) {
+	    !IsSupportedRenderTargetElementSize(info.bytes_per_element)) {
 		EXIT("Tiler: unsupported render-target tile, dst=%p src=%p "
 		     "addr=0x%016" PRIx64 "+0x%016" PRIx64
 		     " extent=%ux%u pitch=%u levels=%u tile=%u bpe=%u\n",

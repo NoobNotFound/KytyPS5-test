@@ -189,8 +189,25 @@ enum class SampledOverlap : uint8_t { None, ReadOnlyAlias, Unsupported };
 enum class StorageSampledOverlap : uint8_t { None, ExactImage, Unsupported };
 enum class StorageImageOverlap : uint8_t { None, RetireSampled, PageNeighbor, Unsupported };
 enum class HostWriteOverlap : uint8_t { None, InvalidateImage, Unsupported };
-enum class BufferImageAlias : uint8_t { None, VideoOutWrite, RenderTargetWrite, Unsupported };
+enum class BufferImageBinding : uint8_t { Texture, VideoOut, RenderTarget, Unsupported };
+enum class BufferImageWrite : uint8_t {
+	None,
+	InvalidateTexture,
+	InvalidateVideoOut,
+	SynchronizeRenderTarget,
+	Unsupported
+};
 enum class MetaImageOverlap : uint8_t { RetainSampled, RetireTarget, Unsupported };
+
+[[nodiscard]] inline constexpr bool IsSupportedRenderTargetElementSize(uint32_t size) noexcept {
+	switch (size) {
+		case 1:
+		case 2:
+		case 4:
+		case 8: return true;
+		default: return false;
+	}
+}
 
 [[nodiscard]] inline constexpr DepthTransitionSource
 SelectDepthTransitionSource(bool depth_load_clear, bool sampled_native_available,
@@ -401,38 +418,31 @@ ClassifyHostWriteOverlap(uint64_t write_address, uint64_t write_size, uint64_t i
 	           : HostWriteOverlap::Unsupported;
 }
 
-[[nodiscard]] inline bool IsSampledBufferWriteTransition(uint64_t buffer_address,
-                                                         uint64_t buffer_size,
-                                                         uint64_t image_address,
-                                                         uint64_t image_size,
-                                                         bool     image_gpu_modified) {
+[[nodiscard]] inline BufferImageWrite
+ClassifyBufferImageWrite(uint64_t buffer_address, uint64_t buffer_size, uint64_t image_address,
+                         uint64_t image_size, BufferImageBinding binding, bool image_gpu_modified,
+                         bool buffer_formatted) {
 	if (!ImagePageRangesOverlap(buffer_address, buffer_size, image_address, image_size)) {
-		return false;
+		return BufferImageWrite::None;
 	}
 	const bool exact        = buffer_address == image_address && buffer_size == image_size;
 	const bool page_aligned = ((buffer_address | buffer_size) & (TRACKER_PAGE_SIZE - 1)) == 0;
-	return exact && page_aligned && !image_gpu_modified;
-}
-
-[[nodiscard]] inline BufferImageAlias
-ClassifyBufferImageAlias(uint64_t buffer_address, uint64_t buffer_size, uint64_t image_address,
-                         uint64_t image_size, bool video_out, bool render_target,
-                         bool image_gpu_modified, bool buffer_written, bool buffer_formatted) {
-	if (!ImagePageRangesOverlap(buffer_address, buffer_size, image_address, image_size)) {
-		return BufferImageAlias::None;
+	switch (binding) {
+		case BufferImageBinding::Texture:
+			return exact && page_aligned && !image_gpu_modified
+			           ? BufferImageWrite::InvalidateTexture
+			           : BufferImageWrite::Unsupported;
+		case BufferImageBinding::VideoOut:
+			return exact && buffer_formatted && !image_gpu_modified
+			           ? BufferImageWrite::InvalidateVideoOut
+			           : BufferImageWrite::Unsupported;
+		case BufferImageBinding::RenderTarget:
+			return exact && page_aligned && buffer_formatted && image_gpu_modified
+			           ? BufferImageWrite::SynchronizeRenderTarget
+			           : BufferImageWrite::Unsupported;
+		case BufferImageBinding::Unsupported: return BufferImageWrite::Unsupported;
 	}
-	const bool exact = buffer_address == image_address && buffer_size == image_size;
-	if (!exact || !buffer_written || !buffer_formatted) {
-		return BufferImageAlias::Unsupported;
-	}
-	if (video_out && !render_target && !image_gpu_modified) {
-		return BufferImageAlias::VideoOutWrite;
-	}
-	const bool page_aligned = ((buffer_address | buffer_size) & (TRACKER_PAGE_SIZE - 1)) == 0;
-	if (render_target && !video_out && image_gpu_modified && page_aligned) {
-		return BufferImageAlias::RenderTargetWrite;
-	}
-	return BufferImageAlias::Unsupported;
+	return BufferImageWrite::Unsupported;
 }
 
 [[nodiscard]] inline DepthOverlap ClassifyDepthOverlap(const ImageInfo&       sampled,

@@ -10254,7 +10254,92 @@ void CheckMetadataReuseDescriptors() {
   std::printf("[host]    %-32s ok\n", "MetadataReuseDescriptors");
 }
 
+void CheckBufferImageWrites() {
+  constexpr uint64_t sampled = 0xe80e0000ull;
+  constexpr uint64_t sampled_size = 0x870000ull;
+  constexpr uint64_t video = 0x1000c10000ull;
+  constexpr uint64_t video_size = 0x1fe0000ull;
+  constexpr uint64_t target = 0x1158d80000ull;
+  constexpr uint64_t target_size = 0x870000ull;
+  struct Case {
+    const char *name;
+    uint64_t buffer_address;
+    uint64_t buffer_size;
+    uint64_t image_address;
+    uint64_t image_size;
+    BufferImageBinding binding;
+    bool gpu_modified;
+    bool formatted;
+    BufferImageWrite expected;
+  };
+  constexpr std::array cases{
+      Case{"sampled exact", sampled, sampled_size, sampled, sampled_size,
+           BufferImageBinding::Texture, false, false,
+           BufferImageWrite::InvalidateTexture},
+      Case{"sampled partial", sampled, sampled_size - TRACKER_PAGE_SIZE,
+           sampled, sampled_size, BufferImageBinding::Texture, false, false,
+           BufferImageWrite::Unsupported},
+      Case{"sampled unaligned", sampled + 1, sampled_size, sampled + 1,
+           sampled_size, BufferImageBinding::Texture, false, false,
+           BufferImageWrite::Unsupported},
+      Case{"sampled GPU-owned", sampled, sampled_size, sampled, sampled_size,
+           BufferImageBinding::Texture, true, false,
+           BufferImageWrite::Unsupported},
+      Case{"sampled disjoint", sampled, sampled_size, sampled + sampled_size,
+           sampled_size, BufferImageBinding::Texture, false, false,
+           BufferImageWrite::None},
+      Case{"video exact", video, video_size, video, video_size,
+           BufferImageBinding::VideoOut, false, true,
+           BufferImageWrite::InvalidateVideoOut},
+      Case{"video disjoint", video, video_size, video + video_size, video_size,
+           BufferImageBinding::VideoOut, false, true, BufferImageWrite::None},
+      Case{"video partial", video, video_size - 4, video, video_size,
+           BufferImageBinding::VideoOut, false, true,
+           BufferImageWrite::Unsupported},
+      Case{"video wrong binding", video, video_size, video, video_size,
+           BufferImageBinding::Unsupported, false, true,
+           BufferImageWrite::Unsupported},
+      Case{"video GPU-owned", video, video_size, video, video_size,
+           BufferImageBinding::VideoOut, true, true,
+           BufferImageWrite::Unsupported},
+      Case{"video unformatted", video, video_size, video, video_size,
+           BufferImageBinding::VideoOut, false, false,
+           BufferImageWrite::Unsupported},
+      Case{"target exact", target, target_size, target, target_size,
+           BufferImageBinding::RenderTarget, true, true,
+           BufferImageWrite::SynchronizeRenderTarget},
+      Case{"target partial", target, target_size - 4, target, target_size,
+           BufferImageBinding::RenderTarget, true, true,
+           BufferImageWrite::Unsupported},
+      Case{"target CPU-owned", target, target_size, target, target_size,
+           BufferImageBinding::RenderTarget, false, true,
+           BufferImageWrite::Unsupported},
+      Case{"target unformatted", target, target_size, target, target_size,
+           BufferImageBinding::RenderTarget, true, false,
+           BufferImageWrite::Unsupported},
+      Case{"target unaligned", target + 0x100, target_size, target + 0x100,
+           target_size, BufferImageBinding::RenderTarget, true, true,
+           BufferImageWrite::Unsupported},
+  };
+  for (const auto &test : cases) {
+    const auto actual = ClassifyBufferImageWrite(
+        test.buffer_address, test.buffer_size, test.image_address,
+        test.image_size, test.binding, test.gpu_modified, test.formatted);
+    Require("BufferImageWrite", test.name, actual == test.expected,
+            "buffer/image write classification mismatch");
+  }
+
+  TileSizeAlign storage{};
+  Require("BufferImageWrite", "target layout",
+          TileGetRenderTargetPitch(1920, 4) == 1920 &&
+              TileGetRenderTargetSize(1920, 1080, 1920, 4, &storage) &&
+              storage.align == 0x10000 && storage.size == target_size,
+          "render-target write fixture has an invalid tiled layout");
+  std::printf("[host]    %-32s ok\n", "BufferImageWrite");
+}
+
 void CheckImageOverlapResolution() {
+  CheckBufferImageWrites();
 	VideoOutPixelFormatInfo video_format {};
 	Require("ImageOverlapResolution", "existing video-out formats",
 	        DecodeVideoOutPixelFormat(0x8000000022000000ull, &video_format) &&
@@ -10393,24 +10478,6 @@ void CheckImageOverlapResolution() {
           ClassifySampledOverlap(separate_page, page_left, false, true) ==
               SampledOverlap::None,
           "sampled images on separate pages were aliased");
-  constexpr uint64_t sampled_buffer_address = 0xe80e0000ull;
-  constexpr uint64_t sampled_buffer_size = 0x870000ull;
-  Require("ImageOverlapResolution", "sampled buffer write transition",
-          IsSampledBufferWriteTransition(
-              sampled_buffer_address, sampled_buffer_size,
-              sampled_buffer_address, sampled_buffer_size, false),
-          "exact page-aligned clean sampled image did not accept a buffer writer");
-  Require("ImageOverlapResolution", "sampled buffer write guards",
-          !IsSampledBufferWriteTransition(
-              sampled_buffer_address, sampled_buffer_size - TRACKER_PAGE_SIZE,
-              sampled_buffer_address, sampled_buffer_size, false) &&
-              !IsSampledBufferWriteTransition(
-                  sampled_buffer_address + 1, sampled_buffer_size,
-                  sampled_buffer_address + 1, sampled_buffer_size, false) &&
-              !IsSampledBufferWriteTransition(
-                  sampled_buffer_address, sampled_buffer_size,
-                  sampled_buffer_address, sampled_buffer_size, true),
-          "partial, unaligned, or GPU-owned sampled image accepted a buffer writer");
   constexpr uint64_t edge_target_address = 0x108ad00100ull;
   constexpr uint64_t edge_target_size = 0x1fa400;
   constexpr uint64_t edge_fault_address = edge_target_address + edge_target_size + 0x1b8;
@@ -10493,35 +10560,6 @@ void CheckImageOverlapResolution() {
                                    true) ==
               HostWriteOverlap::None,
           "host-backed fill aliased a sampled image on another page");
-
-  constexpr uint64_t video_address = 0x1000c10000ull;
-  constexpr uint64_t video_size = 0x1fe0000ull;
-  Require("ImageOverlapResolution", "formatted video-out write",
-          ClassifyBufferImageAlias(video_address, video_size, video_address,
-                                   video_size, true, false, false, true, true) ==
-              BufferImageAlias::VideoOutWrite,
-          "exact formatted video-out buffer write was rejected");
-  Require("ImageOverlapResolution", "video-out alias guards",
-          ClassifyBufferImageAlias(video_address, video_size,
-                                   video_address + video_size, video_size, true,
-                                   false, false, true, true) == BufferImageAlias::None &&
-              ClassifyBufferImageAlias(video_address, video_size - 4,
-                                       video_address, video_size, true, false, false,
-                                       true, true) ==
-                  BufferImageAlias::Unsupported &&
-              ClassifyBufferImageAlias(video_address, video_size, video_address,
-                                       video_size, false, false, false, true, true) ==
-                  BufferImageAlias::Unsupported &&
-              ClassifyBufferImageAlias(video_address, video_size, video_address,
-                                       video_size, true, false, true, true, true) ==
-                  BufferImageAlias::Unsupported &&
-              ClassifyBufferImageAlias(video_address, video_size, video_address,
-                                       video_size, true, false, false, false, true) ==
-                  BufferImageAlias::Unsupported &&
-              ClassifyBufferImageAlias(video_address, video_size, video_address,
-                                       video_size, true, false, false, true, false) ==
-                  BufferImageAlias::Unsupported,
-          "unsupported video-out buffer alias was admitted");
 
   constexpr uint64_t video_metadata = 0x1020c10000ull;
   Require("ImageOverlapResolution", "video-out DCC 256/64/64",
@@ -10646,45 +10684,6 @@ void CheckImageOverlapResolution() {
               !CanNativeClearDepthFromBuffer(d16_depth, d16_depth.address,
                                              d16_depth.size),
           "partial, offset, HTile-backed, or D16 depth clear was admitted");
-
-  constexpr uint64_t target_buffer_address = 0x1158d80000ull;
-  constexpr uint64_t target_buffer_size = 0x870000ull;
-  TileSizeAlign target_storage{};
-  Require("ImageOverlapResolution", "formatted render-target write",
-          TileGetRenderTargetPitch(1920, 4) == 1920 &&
-              TileGetRenderTargetSize(1920, 1080, 1920, 4, &target_storage) &&
-              target_storage.align == 0x10000 &&
-              target_storage.size == target_buffer_size &&
-              ClassifyBufferImageAlias(target_buffer_address, target_buffer_size,
-                                       target_buffer_address, target_buffer_size,
-                                       false, true, true, true, true) ==
-                  BufferImageAlias::RenderTargetWrite,
-          "exact GPU-owned render target was not admitted for formatted buffer synchronization");
-  Require("ImageOverlapResolution", "render-target buffer alias guards",
-          ClassifyBufferImageAlias(target_buffer_address,
-                                   target_buffer_size - 4,
-                                   target_buffer_address, target_buffer_size,
-                                   false, true, true, true, true) ==
-                  BufferImageAlias::Unsupported &&
-              ClassifyBufferImageAlias(target_buffer_address, target_buffer_size,
-                                       target_buffer_address, target_buffer_size,
-                                       false, true, false, true, true) ==
-                  BufferImageAlias::Unsupported &&
-              ClassifyBufferImageAlias(target_buffer_address, target_buffer_size,
-                                       target_buffer_address, target_buffer_size,
-                                       false, true, true, false, true) ==
-                  BufferImageAlias::Unsupported &&
-              ClassifyBufferImageAlias(target_buffer_address, target_buffer_size,
-                                       target_buffer_address, target_buffer_size,
-                                       false, true, true, true, false) ==
-                  BufferImageAlias::Unsupported &&
-              ClassifyBufferImageAlias(target_buffer_address + 0x100,
-                                       target_buffer_size,
-                                       target_buffer_address + 0x100,
-                                       target_buffer_size,
-                                       false, true, true, true, true) ==
-                  BufferImageAlias::Unsupported,
-          "unsupported render-target buffer alias was admitted");
 
   RenderTargetInfo target{};
   target.address = sampled.address;

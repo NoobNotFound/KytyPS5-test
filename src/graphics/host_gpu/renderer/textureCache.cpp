@@ -128,6 +128,16 @@ struct TextureCache::CachedImage {
 	[[nodiscard]] uint32_t RangeCount() const {
 		return kind == Kind::DepthTarget && depth.stencil_address != 0 ? 2u : 1u;
 	}
+	[[nodiscard]] BufferImageBinding BufferBinding() const {
+		switch (kind) {
+			case Kind::Texture: return BufferImageBinding::Texture;
+			case Kind::RenderTarget: return BufferImageBinding::RenderTarget;
+			case Kind::VideoOut: return BufferImageBinding::VideoOut;
+			case Kind::StorageTexture:
+			case Kind::DepthTarget: return BufferImageBinding::Unsupported;
+		}
+		return BufferImageBinding::Unsupported;
+	}
 	[[nodiscard]] uint64_t Address(uint32_t index = 0) const {
 		if (index >= RangeCount()) {
 			EXIT("TextureCache: image address range index out of bounds, index=%u count=%u\n",
@@ -445,8 +455,7 @@ struct TextureCache::ReadbackWorker {
 		if (linear_size > slice_size || cached.image->format != info.format ||
 		    cached.image->extent.width != info.width ||
 		    cached.image->extent.height != info.height ||
-		    (tiled && info.bytes_per_element != 1 && info.bytes_per_element != 2 &&
-		     info.bytes_per_element != 4 && info.bytes_per_element != 8) ||
+		    (tiled && !IsSupportedRenderTargetElementSize(info.bytes_per_element)) ||
 		    meta_overlap || buffer_overlap) {
 			EXIT("TextureCache: color-image readback storage is unsupported, addr=0x%016" PRIx64
 			     " size=0x%016" PRIx64 " linear=0x%016" PRIx64
@@ -3097,20 +3106,24 @@ void TextureCache::SynchronizeRenderTargetToBufferLocked(CachedImage& cached) {
 	                             exact.size <= UINT64_MAX / target.layers &&
 	                             exact.size * target.layers == target.size;
 	const bool    exact_tiled  = tiled && exact.align == 65536 && layered_size;
-	if (cached.kind != CachedImage::Kind::RenderTarget || !cached.gpu_modified ||
-	    cached.buffer_modified || cached.ctx == nullptr || cached.image == nullptr ||
-	    (!linear && !exact_tiled) || target.address == 0 || target.size == 0 || target.width == 0 ||
-	    target.height == 0 || target.pitch < target.width || target.bytes_per_element == 0 ||
-	    target.layers == 0 || target.size % target.layers != 0 || target.size > UINT32_MAX ||
-	    target.levels != 1 || cached.image->layers != target.layers ||
-	    rows > (UINT64_MAX - target.width) / target.pitch) {
+	const bool    valid_cache  = cached.kind == CachedImage::Kind::RenderTarget &&
+	                             cached.gpu_modified && !cached.buffer_modified &&
+	                             cached.ctx != nullptr && cached.image != nullptr;
+	const bool    valid_target =
+	    target.address != 0 && target.size != 0 && target.width != 0 && target.height != 0 &&
+	    target.pitch >= target.width && target.bytes_per_element != 0 && target.layers != 0 &&
+	    target.size % target.layers == 0 && target.size <= UINT32_MAX && target.levels == 1 &&
+	    rows <= (UINT64_MAX - target.width) / target.pitch;
+	const bool valid_image = cached.image != nullptr && cached.image->layers == target.layers;
+	if (!valid_cache || !valid_target || (!linear && !exact_tiled) || !valid_image) {
 		EXIT("TextureCache: unsupported render-target buffer synchronization, "
 		     "addr=0x%016" PRIx64 " size=0x%016" PRIx64
 		     " extent=%ux%u pitch=%u bpe=%u levels=%u layers=%u/%u tile=%u"
 		     " gpu_modified=%d buffer_modified=%d\n",
 		     target.address, target.size, target.width, target.height, target.pitch,
-		     target.bytes_per_element, target.levels, target.layers, cached.image->layers,
-		     target.tile_mode, cached.gpu_modified, cached.buffer_modified);
+		     target.bytes_per_element, target.levels, target.layers,
+		     cached.image == nullptr ? 0 : cached.image->layers, target.tile_mode,
+		     cached.gpu_modified, cached.buffer_modified);
 	}
 	const auto linear_elements = rows * target.pitch + target.width;
 	if (linear_elements > UINT64_MAX / target.bytes_per_element) {
@@ -3121,8 +3134,7 @@ void TextureCache::SynchronizeRenderTargetToBufferLocked(CachedImage& cached) {
 	if (linear_size > slice_size || cached.image->format != target.format ||
 	    cached.image->extent.width != target.width ||
 	    cached.image->extent.height != target.height ||
-	    (tiled && target.bytes_per_element != 1 && target.bytes_per_element != 2 &&
-	     target.bytes_per_element != 4 && target.bytes_per_element != 8) ||
+	    (tiled && !IsSupportedRenderTargetElementSize(target.bytes_per_element)) ||
 	    HasMetaOverlapLocked(target.address, target.size)) {
 		EXIT("TextureCache: render-target buffer synchronization storage mismatch, "
 		     "addr=0x%016" PRIx64 " size=0x%016" PRIx64 " linear=0x%016" PRIx64 "\n",
@@ -3184,24 +3196,18 @@ bool TextureCache::InvalidateMemoryFromGPU(uint64_t vaddr, uint64_t size,
 		m_metadata_tracker.UntrackMemory(it->first, it->second.size);
 		it = m_surface_metas.erase(it);
 	}
-	auto             match         = m_images.end();
-	BufferImageAlias action        = BufferImageAlias::None;
-	bool             sampled_write = false;
+	auto             match  = m_images.end();
+	BufferImageWrite action = BufferImageWrite::None;
 	for (auto it = m_images.begin(); it != m_images.end(); ++it) {
 		auto& cached = **it;
 		if (!cached.OverlapsRange(vaddr, size, false)) {
 			continue;
 		}
-		const auto alias =
-		    ClassifyBufferImageAlias(vaddr, size, cached.Address(), cached.Size(),
-		                             cached.kind == CachedImage::Kind::VideoOut,
-		                             cached.kind == CachedImage::Kind::RenderTarget,
-		                             cached.gpu_modified, true, formatted_buffer_write);
-		const bool sampled = cached.kind == CachedImage::Kind::Texture &&
-		                     IsSampledBufferWriteTransition(vaddr, size, cached.Address(),
-		                                                    cached.Size(), cached.gpu_modified);
-		if (match != m_images.end() || (!sampled && alias != BufferImageAlias::VideoOutWrite &&
-		                                alias != BufferImageAlias::RenderTargetWrite)) {
+		const auto next = ClassifyBufferImageWrite(vaddr, size, cached.Address(), cached.Size(),
+		                                           cached.BufferBinding(), cached.gpu_modified,
+		                                           formatted_buffer_write);
+		if (match != m_images.end() || next == BufferImageWrite::None ||
+		    next == BufferImageWrite::Unsupported) {
 			EXIT("TextureCache: unsupported GPU invalidation alias, addr=0x%016" PRIx64
 			     " size=0x%016" PRIx64 " cached_kind=%u cached=0x%016" PRIx64 "+0x%016" PRIx64
 			     " gpu_modified=%d buffer_modified=%d formatted=%d ambiguous=%d\n",
@@ -3209,29 +3215,25 @@ bool TextureCache::InvalidateMemoryFromGPU(uint64_t vaddr, uint64_t size,
 			     cached.gpu_modified, cached.buffer_modified, formatted_buffer_write,
 			     match != m_images.end());
 		}
-		match         = it;
-		action        = sampled ? BufferImageAlias::None : alias;
-		sampled_write = sampled;
+		match  = it;
+		action = next;
 	}
 	if (match == m_images.end()) {
 		return false;
 	}
-	if (sampled_write) {
-		(**match).buffer_modified = true;
-		return true;
+	auto& cached = **match;
+	switch (action) {
+		case BufferImageWrite::InvalidateTexture:
+		case BufferImageWrite::InvalidateVideoOut: cached.buffer_modified = true; return true;
+		case BufferImageWrite::SynchronizeRenderTarget:
+			SynchronizeRenderTargetToBufferLocked(cached);
+			return true;
+		case BufferImageWrite::None:
+		case BufferImageWrite::Unsupported:
+			EXIT("TextureCache: invalid GPU invalidation action %u\n",
+			     static_cast<uint32_t>(action));
 	}
-	if (action == BufferImageAlias::VideoOutWrite) {
-		auto& cached           = **match;
-		cached.buffer_modified = true;
-		return true;
-	}
-	if (action == BufferImageAlias::RenderTargetWrite) {
-		SynchronizeRenderTargetToBufferLocked(**match);
-		return true;
-	}
-	m_memory_tracker.UntrackMemory(vaddr, size);
-	m_images.erase(match);
-	return true;
+	return false;
 }
 
 DepthStencilVulkanImage* TextureCache::FindDepthTargetByRange(uint64_t vaddr, uint64_t size) {
