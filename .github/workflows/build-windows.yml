@@ -1,0 +1,82 @@
+name: Build Windows
+
+# Manual trigger only — never runs on push/PR/schedule.
+on:
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: "CMake build type"
+        required: false
+        default: "Release"
+        type: choice
+        options:
+          - Release
+          - RelWithDebInfo
+          - Debug
+
+env:
+  QT_VERSION: "6.7.2"
+  VULKAN_SDK_VERSION: "1.3.290.0"
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Install Ninja
+        uses: seanmiddleditch/gha-setup-ninja@v5
+
+      - name: Setup Vulkan SDK
+        uses: jakoch/install-vulkan-sdk-action@v1
+        with:
+          vulkan_version: ${{ env.VULKAN_SDK_VERSION }}
+          install_runtime: true
+          cache: true
+          stripdown: true
+
+      - name: Setup Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          host: windows
+          target: desktop
+          arch: win64_msvc2019_64
+          modules: qtimageformats
+          cache: true
+
+      - name: Setup MSVC dev environment (x64)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Configure (CMake + Ninja + clang-cl)
+        shell: cmd
+        run: |
+          cmake -S src -B _Build/windows -G Ninja ^
+            -DCMAKE_BUILD_TYPE=${{ github.event.inputs.build_type }} ^
+            -DCMAKE_C_COMPILER=clang-cl ^
+            -DCMAKE_CXX_COMPILER=clang-cl ^
+            -DCMAKE_PREFIX_PATH="${{ env.Qt6_DIR }}"
+
+      - name: Build launcher target
+        shell: cmd
+        run: cmake --build _Build/windows --target launcher --config ${{ github.event.inputs.build_type }}
+
+      - name: Install / stage runnable build
+        shell: cmd
+        run: cmake --install _Build/windows --prefix _Build/windows/install
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: KytyPS5-windows-${{ github.event.inputs.build_type }}-${{ github.sha }}
+          path: _Build/windows/install/**
+          if-no-files-found: error
+          retention-days: 14
