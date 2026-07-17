@@ -438,11 +438,21 @@ static void VulkanFindPhysicalDevice(VkInstance instance, VkSurfaceKHR surface,
 			skip_device = true;
 		}
 
-		if (!skip_device && !CheckFormat(device, VK_FORMAT_BC3_SRGB_BLOCK, true,
-		                                 VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
-		                                     VK_FORMAT_FEATURE_TRANSFER_DST_BIT)) {
-			LOGF("Format VK_FORMAT_BC3_SRGB_BLOCK cannot be used as texture\n");
-			skip_device = true;
+		// NOTE (macOS/MoltenVK patch): downgraded from a hard disqualifier to a warning.
+		// BC texture compression is gated by MTLDevice.supportsBCTextureCompression in
+		// MoltenVK, which Apple Silicon GPUs report as false (BC/S3TC is an Intel/AMD
+		// desktop-GPU format; Apple Silicon uses ASTC instead) - so this rejected every
+		// device on Apple Silicon, on any MoltenVK version. This does NOT add a texture
+		// fallback: any game asset actually using BC3 will still fail later at texture
+		// creation/upload. A real fix needs a runtime BC->uncompressed (or BC->ASTC)
+		// decode path in the texture loader - out of scope for this device-selection
+		// patch. Keeping this as a loud warning so it's visible in the log rather than
+		// silently wrong.
+		if (!CheckFormat(device, VK_FORMAT_BC3_SRGB_BLOCK, true,
+		                 VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT)) {
+			LOGF("WARNING: Format VK_FORMAT_BC3_SRGB_BLOCK cannot be used as texture on this "
+			     "device (expected on Apple Silicon MoltenVK) - BC-compressed textures WILL "
+			     "fail later without a decode fallback\n");
 		}
 
 		if (!skip_device && !CheckFormat(device, VK_FORMAT_R8G8B8A8_SRGB, true,
