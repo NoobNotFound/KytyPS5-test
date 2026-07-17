@@ -205,7 +205,7 @@ NativeAddressBuffer(uint64_t submit_id, CommandBuffer* command_buffer,
 	                                                    ->GetPhysicalDeviceProperties()
 	                                                    .limits.maxStorageBufferRange);
 	uint64_t   size   = 0;
-	const auto access = HostMemoryAccess::Read;
+	const auto access = HostMemoryAccess::Mapped;
 	if (!HostMemoryQueryRange(address.binding_base, limit, access, &size)) {
 		EXIT("address resource is not host-accessible: base=0x%016" PRIx64 "\n",
 		     address.binding_base);

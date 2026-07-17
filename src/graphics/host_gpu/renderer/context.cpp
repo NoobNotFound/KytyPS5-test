@@ -332,7 +332,7 @@ void CommandBuffer::Execute() {
 
 	m_execute      = true;
 	m_fence_waited = false;
-	m_submit_seq = g_command_buffer_submit_seq.fetch_add(1, std::memory_order_relaxed) + 1;
+	m_submit_seq   = g_command_buffer_submit_seq.fetch_add(1, std::memory_order_relaxed) + 1;
 
 	if (result != VK_SUCCESS) {
 		LOGF("vkQueueSubmit failed: %s (%d), queue=%d index=%u submit_seq=%" PRIu64
@@ -396,7 +396,7 @@ void CommandBuffer::ExecuteWithSemaphore(VkSemaphore signal_semaphore) {
 
 	m_execute      = true;
 	m_fence_waited = false;
-	m_submit_seq = g_command_buffer_submit_seq.fetch_add(1, std::memory_order_relaxed) + 1;
+	m_submit_seq   = g_command_buffer_submit_seq.fetch_add(1, std::memory_order_relaxed) + 1;
 
 	if (result != VK_SUCCESS) {
 		LOGF("vkQueueSubmit failed: %s (%d), queue=%d index=%u submit_seq=%" PRIu64
@@ -464,7 +464,7 @@ void CommandBuffer::ExecuteWithSemaphore(VkSemaphore          wait_semaphore,
 
 	m_execute      = true;
 	m_fence_waited = false;
-	m_submit_seq = g_command_buffer_submit_seq.fetch_add(1, std::memory_order_relaxed) + 1;
+	m_submit_seq   = g_command_buffer_submit_seq.fetch_add(1, std::memory_order_relaxed) + 1;
 
 	if (result != VK_SUCCESS) {
 		LOGF("vkQueueSubmit failed: %s (%d), queue=%d index=%u submit_seq=%" PRIu64
@@ -518,6 +518,7 @@ void CommandBuffer::WaitForFenceAndReset() {
 		m_fence_waited = false;
 		vkResetCommandBuffer(m_pool->buffers[m_index],
 		                     VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);
+		m_recording_generation++;
 	}
 	m_host_stream.Reset();
 	if (was_executed) {

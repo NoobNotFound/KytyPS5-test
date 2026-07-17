@@ -1,7 +1,3 @@
-#include "graphics/host_gpu/renderer/render.h"
-
-#include "graphics/host_gpu/renderer/renderInternal.h"
-
 #include "common/assert.h"
 #include "common/common.h"
 #include "common/emulatorConfig.h"
@@ -19,7 +15,9 @@
 #include "graphics/host_gpu/renderer/descriptorCache.h"
 #include "graphics/host_gpu/renderer/framebufferCache.h"
 #include "graphics/host_gpu/renderer/pipelineCache.h"
+#include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
+#include "graphics/host_gpu/renderer/renderInternal.h"
 #include "graphics/host_gpu/renderer/renderState.h"
 #include "graphics/host_gpu/renderer/shaderResourceBarrier.h"
 #include "graphics/host_gpu/renderer/shaderSubgroup.h"
@@ -547,30 +545,38 @@ void RenderDispatchDirect(uint64_t submit_id, CommandBuffer* buffer, HW::Context
 		return;
 	}
 
-	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
-	auto* pipeline  = g_render_ctx->GetPipelineCache()->CreateComputePipeline(
-	    &input_info, &sh_ctx->GetCs(), cs_shader);
+	for (;;) {
+		const auto recording_generation = buffer->GetRecordingGeneration();
+		auto*      vk_buffer            = buffer->GetPool()->buffers[buffer->GetIndex()];
+		auto*      pipeline             = g_render_ctx->GetPipelineCache()->CreateComputePipeline(
+		    &input_info, &sh_ctx->GetCs(), cs_shader);
 
-	vkCmdBindPipeline(vk_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
+		vkCmdBindPipeline(vk_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
 
-	const auto address_writes = BindDescriptors(
-	    submit_id, buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline_layout,
-	    input_info.stage, VK_SHADER_STAGE_COMPUTE_BIT, DescriptorCache::Stage::Compute);
+		const auto address_writes = BindDescriptors(
+		    submit_id, buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline_layout,
+		    input_info.stage, VK_SHADER_STAGE_COMPUTE_BIT, DescriptorCache::Stage::Compute);
+		if (buffer->GetRecordingGeneration() != recording_generation) {
+			continue;
+		}
 
-	vkCmdDispatch(vk_buffer, thread_group_x, thread_group_y, thread_group_z);
+		vkCmdDispatch(vk_buffer, thread_group_x, thread_group_y, thread_group_z);
 
-	bool has_storage_writes = HasShaderBufferWrites(input_info.stage);
-	has_storage_writes      = MarkShaderAddressWrites(address_writes) || has_storage_writes;
-	has_storage_writes =
-	    std::any_of(program.info.images.begin(), program.info.images.end(),
-	                [](const auto& image) {
-		                return image.written &&
-		                       (image.kind == ShaderRecompiler::IR::ResourceKind::StorageImage ||
-		                        image.kind == ShaderRecompiler::IR::ResourceKind::StorageImageUint);
-	                }) ||
-	    has_storage_writes;
-	if (has_storage_writes) {
-		ShaderWriteBarrier(vk_buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+		bool has_storage_writes = HasShaderBufferWrites(input_info.stage);
+		has_storage_writes      = MarkShaderAddressWrites(address_writes) || has_storage_writes;
+		has_storage_writes =
+		    std::any_of(
+		        program.info.images.begin(), program.info.images.end(),
+		        [](const auto& image) {
+			        return image.written &&
+			               (image.kind == ShaderRecompiler::IR::ResourceKind::StorageImage ||
+			                image.kind == ShaderRecompiler::IR::ResourceKind::StorageImageUint);
+		        }) ||
+		    has_storage_writes;
+		if (has_storage_writes) {
+			ShaderWriteBarrier(vk_buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+		}
+		break;
 	}
 }
 

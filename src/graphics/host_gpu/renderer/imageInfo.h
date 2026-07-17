@@ -187,6 +187,7 @@ enum class RenderTargetOverlap : uint8_t {
 };
 enum class SampledOverlap : uint8_t { None, ReadOnlyAlias, Unsupported };
 enum class StorageSampledOverlap : uint8_t { None, ExactImage, Unsupported };
+enum class StorageSampledViewShape : uint8_t { Image2D, Image2DArray, Image3D, Unsupported };
 enum class StorageImageOverlap : uint8_t { None, RetireSampled, PageNeighbor, Unsupported };
 enum class HostWriteOverlap : uint8_t { None, InvalidateImage, Unsupported };
 enum class BufferImageBinding : uint8_t { Texture, VideoOut, RenderTarget, Unsupported };
@@ -198,6 +199,22 @@ enum class BufferImageWrite : uint8_t {
 	Unsupported
 };
 enum class MetaImageOverlap : uint8_t { RetainSampled, RetireTarget, Unsupported };
+
+[[nodiscard]] inline constexpr StorageSampledViewShape
+SelectStorageSampledViewShape(uint32_t type, uint32_t depth, uint32_t backing_layers) noexcept {
+	switch (static_cast<Prospero::ImageType>(type)) {
+		case Prospero::ImageType::kColor2D:
+			return depth == 1 && backing_layers == 1 ? StorageSampledViewShape::Image2D
+			                                          : StorageSampledViewShape::Unsupported;
+		case Prospero::ImageType::kColor2DArray:
+			return depth != 0 && depth == backing_layers ? StorageSampledViewShape::Image2DArray
+			                                               : StorageSampledViewShape::Unsupported;
+		case Prospero::ImageType::kColor3D:
+			return depth != 0 && backing_layers == 1 ? StorageSampledViewShape::Image3D
+			                                          : StorageSampledViewShape::Unsupported;
+		default: return StorageSampledViewShape::Unsupported;
+	}
+}
 
 [[nodiscard]] inline constexpr bool IsSupportedRenderTargetElementSize(uint32_t size) noexcept {
 	switch (size) {

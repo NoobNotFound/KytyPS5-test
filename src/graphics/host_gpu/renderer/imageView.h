@@ -9,11 +9,14 @@
 namespace Libs::Graphics {
 
 [[nodiscard]] inline bool IsSupportedStorageSwizzle(uint32_t format, uint32_t swizzle) noexcept {
-	const bool single_channel_uint = format == Prospero::GpuEnumValue(Prospero::BufferFormat::k8UInt) ||
-	                                 format == Prospero::GpuEnumValue(Prospero::BufferFormat::k16UInt) ||
-	                                 format == Prospero::GpuEnumValue(Prospero::BufferFormat::k32UInt);
+	const bool single_channel = format == Prospero::GpuEnumValue(Prospero::BufferFormat::k8UNorm) ||
+	                            format == Prospero::GpuEnumValue(Prospero::BufferFormat::k8UInt) ||
+	                            format == Prospero::GpuEnumValue(Prospero::BufferFormat::k16UInt) ||
+	                            format == Prospero::GpuEnumValue(Prospero::BufferFormat::k32UInt) ||
+	                            format == Prospero::GpuEnumValue(Prospero::BufferFormat::k16Float) ||
+	                            format == Prospero::GpuEnumValue(Prospero::BufferFormat::k32Float);
 	return swizzle == DstSel(4, 5, 6, 7) ||
-	       (single_channel_uint &&
+	       (single_channel &&
 	        (swizzle == DstSel(4, 0, 0, 0) || swizzle == DstSel(4, 0, 0, 1))) ||
 	       (format == Prospero::GpuEnumValue(Prospero::BufferFormat::k8_8_8_8UNorm) &&
 	        (swizzle == DstSel(4, 5, 6, 1) || swizzle == DstSel(6, 5, 4, 7))) ||
@@ -114,12 +117,15 @@ IsSupportedSampledDepthResource(const ShaderRecompiler::IR::ImageResource& resou
 
 [[nodiscard]] inline int SelectStorageColorView(VkFormat image_format, VkFormat view_format,
                                                 uint32_t swizzle) noexcept {
-	const bool single_channel_uint = view_format == VK_FORMAT_R8_UINT ||
-	                                 view_format == VK_FORMAT_R16_UINT ||
-	                                 view_format == VK_FORMAT_R32_UINT;
+	const bool single_channel = view_format == VK_FORMAT_R8_UNORM ||
+	                            view_format == VK_FORMAT_R8_UINT ||
+	                            view_format == VK_FORMAT_R16_UINT ||
+	                            view_format == VK_FORMAT_R32_UINT ||
+	                            view_format == VK_FORMAT_R16_SFLOAT ||
+	                            view_format == VK_FORMAT_R32_SFLOAT;
 	const bool swizzle_ok =
 	    swizzle == DstSel(4, 5, 6, 7) ||
-	    (single_channel_uint && (swizzle == DstSel(4, 0, 0, 0) || swizzle == DstSel(4, 0, 0, 1))) ||
+	    (single_channel && (swizzle == DstSel(4, 0, 0, 0) || swizzle == DstSel(4, 0, 0, 1))) ||
 	    (view_format == VK_FORMAT_R8G8B8A8_UNORM &&
 	     (swizzle == DstSel(4, 5, 6, 1) || swizzle == DstSel(6, 5, 4, 7))) ||
 	    (view_format == VK_FORMAT_R32G32B32A32_SFLOAT && swizzle == DstSel(5, 6, 7, 4));

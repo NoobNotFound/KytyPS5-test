@@ -13,31 +13,29 @@
 #include "kernel/pthread.h"
 #include "libs/errno.h"
 
-#include <cstring>
 #include <limits>
 
 namespace Libs::Graphics {
 
-constexpr int GRAPHICS_EVENT_QUEUED_GRAPHICS_INTERRUPT = 0x00;
-constexpr int GRAPHICS_EVENT_EOP                       = 0x40;
-constexpr uint64_t GRAPHICS_REFERENCE_CLOCK_FREQUENCY  = 100000000;
+constexpr int      GRAPHICS_EVENT_QUEUED_GRAPHICS_INTERRUPT = 0x00;
+constexpr int      GRAPHICS_EVENT_EOP                       = 0x40;
+constexpr uint64_t GRAPHICS_REFERENCE_CLOCK_FREQUENCY       = 100000000;
 
 bool GraphicsScaleReferenceClock(uint64_t host_ticks, uint64_t host_frequency, uint64_t* value) {
 	if (host_frequency == 0 || value == nullptr) {
 		return false;
 	}
 
-	const auto whole_seconds = host_ticks / host_frequency;
-	const auto remainder     = host_ticks % host_frequency;
-	constexpr auto MAX_VALUE = std::numeric_limits<uint64_t>::max();
+	const auto     whole_seconds = host_ticks / host_frequency;
+	const auto     remainder     = host_ticks % host_frequency;
+	constexpr auto MAX_VALUE     = std::numeric_limits<uint64_t>::max();
 	if (whole_seconds > MAX_VALUE / GRAPHICS_REFERENCE_CLOCK_FREQUENCY ||
 	    remainder > MAX_VALUE / GRAPHICS_REFERENCE_CLOCK_FREQUENCY) {
 		return false;
 	}
 
-	const auto whole_value = whole_seconds * GRAPHICS_REFERENCE_CLOCK_FREQUENCY;
-	const auto fractional_value =
-	    (remainder * GRAPHICS_REFERENCE_CLOCK_FREQUENCY) / host_frequency;
+	const auto whole_value      = whole_seconds * GRAPHICS_REFERENCE_CLOCK_FREQUENCY;
+	const auto fractional_value = (remainder * GRAPHICS_REFERENCE_CLOCK_FREQUENCY) / host_frequency;
 	if (whole_value > MAX_VALUE - fractional_value) {
 		return false;
 	}
@@ -50,38 +48,17 @@ uint64_t GraphicsRenderReadReferenceClock() {
 	const auto host_ticks     = LibKernel::KernelReadTsc();
 	uint64_t   value          = 0;
 	if (!GraphicsScaleReferenceClock(host_ticks, host_frequency, &value)) {
-		EXIT("cannot scale host clock, ticks=0x%016" PRIx64 " frequency=%" PRIu64 "\n",
-		     host_ticks, host_frequency);
+		EXIT("cannot scale host clock, ticks=0x%016" PRIx64 " frequency=%" PRIu64 "\n", host_ticks,
+		     host_frequency);
 	}
 	return value;
 }
 
-static void SubmitLabel32(CommandBuffer* buffer, uint32_t* dst, uint32_t value,
-                          LabelCallback callback_1 = nullptr, LabelCallback callback_2 = nullptr,
-                          const uint64_t* args = nullptr) {
-	auto* label =
-	    LabelCreate32(g_render_ctx->GetGraphicCtx(), dst, value, callback_1, callback_2, args);
+static void SubmitLabel(CommandBuffer* buffer, LabelCallback callback_1 = nullptr,
+                        LabelCallback callback_2 = nullptr, const uint64_t* args = nullptr) {
+	auto* label = LabelCreate(g_render_ctx->GetGraphicCtx(), callback_1, callback_2, args);
 	LabelSet(buffer, label);
 	LabelDelete(label);
-}
-
-static void SubmitLabel64(CommandBuffer* buffer, uint64_t* dst, uint64_t value,
-                          LabelCallback callback_1 = nullptr, LabelCallback callback_2 = nullptr,
-                          const uint64_t* args = nullptr) {
-	auto* label =
-	    LabelCreate64(g_render_ctx->GetGraphicCtx(), dst, value, callback_1, callback_2, args);
-	LabelSet(buffer, label);
-	LabelDelete(label);
-}
-
-template <typename T>
-static void PublishImmediateFence(T* dst, T value) {
-	static_assert(sizeof(T) == sizeof(uint32_t) || sizeof(T) == sizeof(uint64_t));
-	EXIT_IF(dst == nullptr);
-	// EOP/EOS fence payloads are constant and published while parsing the packet. Kyty performs the
-	// direct mapped write under CommandProcessorGuestAccessScope: a protected access is first resolved by
-	// BufferCache inline, then this instruction retries so the EOP payload wins over prior GPU bytes.
-	std::memcpy(dst, &value, sizeof(value));
 }
 
 static bool CompleteDisplayBufferFlip(const uint64_t* args) {
@@ -114,8 +91,6 @@ void GraphicsRenderWriteAtEndOfPipe32(uint64_t submit_id, CommandBuffer* buffer,
 
 	buffer->SetDebugInfo(static_cast<uint32_t>(CommandBufferDebugOp::EopWrite), submit_id, 4, value,
 	                     0, 0, reinterpret_cast<uint64_t>(dst_gpu_addr));
-
-	PublishImmediateFence(dst_gpu_addr, value);
 }
 
 void GraphicsRenderWriteAtEndOfPipeGds32(uint64_t submit_id, CommandBuffer* buffer,
@@ -128,28 +103,6 @@ void GraphicsRenderWriteAtEndOfPipeGds32(uint64_t submit_id, CommandBuffer* buff
 
 	buffer->SetDebugInfo(static_cast<uint32_t>(CommandBufferDebugOp::EopWrite), submit_id,
 	                     dw_offset, dw_num, 0, 0, reinterpret_cast<uint64_t>(dst_gpu_addr));
-
-	uint64_t args[LABEL_ARGS_MAX] = {static_cast<uint64_t>(dw_offset),
-	                                 static_cast<uint64_t>(dw_num),
-	                                 reinterpret_cast<uint64_t>(dst_gpu_addr), 0};
-
-	SubmitLabel32(
-	    buffer, dst_gpu_addr, 0,
-	    [](const uint64_t* args) {
-		    auto  dw_offset    = static_cast<uint32_t>(args[0]);
-		    auto  dw_num       = static_cast<uint32_t>(args[1]);
-		    auto* dst_gpu_addr = reinterpret_cast<uint32_t*>(args[2]);
-		    if (dst_gpu_addr == nullptr || dw_num == 0) {
-			    EXIT("invalid asynchronous EOP GDS write\n");
-		    }
-		    const auto size = static_cast<uint64_t>(dw_num) * sizeof(uint32_t);
-		    auto transaction = g_render_ctx->GetGpuResources()->LockAsynchronousGuestWrite(
-		        reinterpret_cast<uint64_t>(dst_gpu_addr), size);
-		    g_render_ctx->GetGdsBuffer()->Read(g_render_ctx->GetGraphicCtx(), dst_gpu_addr,
-		                                       dw_offset, dw_num);
-		    return false;
-	    },
-	    nullptr, args);
 }
 
 void GraphicsRenderWriteAtEndOfPipe64(uint64_t submit_id, CommandBuffer* buffer,
@@ -162,12 +115,10 @@ void GraphicsRenderWriteAtEndOfPipe64(uint64_t submit_id, CommandBuffer* buffer,
 	buffer->SetDebugInfo(static_cast<uint32_t>(CommandBufferDebugOp::EopWrite), submit_id, 8,
 	                     static_cast<uint32_t>(value), static_cast<uint32_t>(value >> 32u), 0,
 	                     reinterpret_cast<uint64_t>(dst_gpu_addr));
-
-	PublishImmediateFence(dst_gpu_addr, value);
 }
 
 void GraphicsRenderWriteAtEndOfPipeClockCounter(uint64_t submit_id, CommandBuffer* buffer,
-                                                uint64_t* dst_gpu_addr) {
+                                                uint64_t* dst_gpu_addr, uint64_t value) {
 	EXIT_IF(g_render_ctx == nullptr);
 	EXIT_IF(dst_gpu_addr == nullptr);
 	EXIT_IF(buffer == nullptr);
@@ -176,8 +127,6 @@ void GraphicsRenderWriteAtEndOfPipeClockCounter(uint64_t submit_id, CommandBuffe
 	buffer->SetDebugInfo(static_cast<uint32_t>(CommandBufferDebugOp::EopWrite), submit_id, 8, 0, 0,
 	                     0, reinterpret_cast<uint64_t>(dst_gpu_addr));
 
-	const auto value = GraphicsRenderReadReferenceClock();
-	PublishImmediateFence(dst_gpu_addr, value);
 	LOGF_COLOR(Log::Color::BrightGreen,
 	           "EndOfPipe Signal!!! [0x%016" PRIx64 "] <- Clock: 0x%016" PRIx64 "\n",
 	           reinterpret_cast<uint64_t>(dst_gpu_addr), value);
@@ -185,7 +134,8 @@ void GraphicsRenderWriteAtEndOfPipeClockCounter(uint64_t submit_id, CommandBuffe
 
 void GraphicsRenderWriteAtEndOfPipeClockCounterWithWriteBack(uint64_t       submit_id,
                                                              CommandBuffer* buffer,
-                                                             uint64_t*      dst_gpu_addr) {
+                                                             uint64_t*      dst_gpu_addr,
+                                                             uint64_t       value) {
 	EXIT_IF(g_render_ctx == nullptr);
 	EXIT_IF(dst_gpu_addr == nullptr);
 	EXIT_IF(buffer == nullptr);
@@ -194,8 +144,6 @@ void GraphicsRenderWriteAtEndOfPipeClockCounterWithWriteBack(uint64_t       subm
 	buffer->SetDebugInfo(static_cast<uint32_t>(CommandBufferDebugOp::EopWriteBack), submit_id, 8, 0,
 	                     0, 0, reinterpret_cast<uint64_t>(dst_gpu_addr));
 
-	const auto value = GraphicsRenderReadReferenceClock();
-	PublishImmediateFence(dst_gpu_addr, value);
 	LOGF_COLOR(Log::Color::BrightGreen,
 	           "EndOfPipe Signal!!! [0x%016" PRIx64 "] <- Clock: 0x%016" PRIx64 "\n",
 	           reinterpret_cast<uint64_t>(dst_gpu_addr), value);
@@ -211,8 +159,6 @@ void GraphicsRenderWriteAtEndOfPipeWithWriteBack64(uint64_t submit_id, CommandBu
 	buffer->SetDebugInfo(static_cast<uint32_t>(CommandBufferDebugOp::EopWriteBack), submit_id, 8,
 	                     static_cast<uint32_t>(value), static_cast<uint32_t>(value >> 32u), 0,
 	                     reinterpret_cast<uint64_t>(dst_gpu_addr));
-
-	PublishImmediateFence(dst_gpu_addr, value);
 }
 
 void GraphicsRenderWriteAtEndOfPipeWithWriteBack32(uint64_t submit_id, CommandBuffer* buffer,
@@ -224,8 +170,6 @@ void GraphicsRenderWriteAtEndOfPipeWithWriteBack32(uint64_t submit_id, CommandBu
 
 	buffer->SetDebugInfo(static_cast<uint32_t>(CommandBufferDebugOp::EopWriteBack), submit_id, 4,
 	                     value, 0, 0, reinterpret_cast<uint64_t>(dst_gpu_addr));
-
-	PublishImmediateFence(dst_gpu_addr, value);
 }
 
 void GraphicsRenderWriteAtEndOfPipeWithInterruptWriteBack64(uint64_t       submit_id,
@@ -241,12 +185,10 @@ void GraphicsRenderWriteAtEndOfPipeWithInterruptWriteBack64(uint64_t       submi
 	                     context_id, static_cast<uint32_t>(value),
 	                     static_cast<uint32_t>(value >> 32u),
 	                     reinterpret_cast<uint64_t>(dst_gpu_addr));
-	PublishImmediateFence(dst_gpu_addr, value);
-
 	uint64_t args[LABEL_ARGS_MAX] = {context_id != 0 ? context_id : value};
 
-	SubmitLabel64(
-	    buffer, nullptr, 0, nullptr,
+	SubmitLabel(
+	    buffer, nullptr,
 	    [](const uint64_t* args) {
 		    EXIT_IF(g_render_ctx == nullptr);
 		    g_render_ctx->TriggerEopEvent(static_cast<uint32_t>(args[0]));
@@ -266,12 +208,10 @@ void GraphicsRenderWriteAtEndOfPipeWithInterruptWriteBack32(uint64_t       submi
 
 	buffer->SetDebugInfo(static_cast<uint32_t>(CommandBufferDebugOp::EopWriteBack), submit_id, 4,
 	                     context_id, value, 0, reinterpret_cast<uint64_t>(dst_gpu_addr));
-	PublishImmediateFence(dst_gpu_addr, value);
-
 	uint64_t args[LABEL_ARGS_MAX] = {context_id != 0 ? context_id : value};
 
-	SubmitLabel32(
-	    buffer, nullptr, 0, nullptr,
+	SubmitLabel(
+	    buffer, nullptr,
 	    [](const uint64_t* args) {
 		    EXIT_IF(g_render_ctx == nullptr);
 		    g_render_ctx->TriggerEopEvent(static_cast<uint32_t>(args[0]));
@@ -292,12 +232,10 @@ void GraphicsRenderWriteAtEndOfPipeWithInterrupt64(uint64_t submit_id, CommandBu
 	                     context_id, static_cast<uint32_t>(value),
 	                     static_cast<uint32_t>(value >> 32u),
 	                     reinterpret_cast<uint64_t>(dst_gpu_addr));
-	PublishImmediateFence(dst_gpu_addr, value);
-
 	uint64_t args[LABEL_ARGS_MAX] = {context_id != 0 ? context_id : value};
 
-	SubmitLabel64(
-	    buffer, nullptr, 0, nullptr,
+	SubmitLabel(
+	    buffer, nullptr,
 	    [](const uint64_t* args) {
 		    EXIT_IF(g_render_ctx == nullptr);
 		    g_render_ctx->TriggerEopEvent(static_cast<uint32_t>(args[0]));
@@ -316,12 +254,10 @@ void GraphicsRenderWriteAtEndOfPipeWithInterrupt32(uint64_t submit_id, CommandBu
 
 	buffer->SetDebugInfo(static_cast<uint32_t>(CommandBufferDebugOp::EopInterrupt), submit_id, 4,
 	                     context_id, value, 0, reinterpret_cast<uint64_t>(dst_gpu_addr));
-	PublishImmediateFence(dst_gpu_addr, value);
-
 	uint64_t args[LABEL_ARGS_MAX] = {context_id != 0 ? context_id : value};
 
-	SubmitLabel32(
-	    buffer, nullptr, 0, nullptr,
+	SubmitLabel(
+	    buffer, nullptr,
 	    [](const uint64_t* args) {
 		    EXIT_IF(g_render_ctx == nullptr);
 		    g_render_ctx->TriggerEopEvent(static_cast<uint32_t>(args[0]));
@@ -360,11 +296,9 @@ void GraphicsRenderWriteAtEndOfPipeWithInterruptWriteBackFlip32(
 	buffer->SetDebugInfo(static_cast<uint32_t>(CommandBufferDebugOp::EopWriteBackFlip), submit_id,
 	                     static_cast<uint32_t>(handle), static_cast<uint32_t>(index),
 	                     static_cast<uint32_t>(flip_mode), value, static_cast<uint64_t>(flip_arg));
-	PublishImmediateFence(dst_gpu_addr, value);
-
 	const uint64_t args[LABEL_ARGS_MAX] = {request_id};
-	SubmitLabel32(
-	    buffer, nullptr, 0, CompleteDisplayBufferFlip,
+	SubmitLabel(
+	    buffer, CompleteDisplayBufferFlip,
 	    [](const uint64_t* /*args*/) {
 		    EXIT_IF(g_render_ctx == nullptr);
 		    g_render_ctx->TriggerEopEvent(0);
@@ -385,10 +319,8 @@ void GraphicsRenderWriteAtEndOfPipeWithFlip32(uint64_t submit_id, CommandBuffer*
 	buffer->SetDebugInfo(static_cast<uint32_t>(CommandBufferDebugOp::EopFlip), submit_id,
 	                     static_cast<uint32_t>(handle), static_cast<uint32_t>(index),
 	                     static_cast<uint32_t>(flip_mode), value, static_cast<uint64_t>(flip_arg));
-	PublishImmediateFence(dst_gpu_addr, value);
-
 	const uint64_t args[LABEL_ARGS_MAX] = {request_id};
-	SubmitLabel32(buffer, nullptr, 0, CompleteDisplayBufferFlip, nullptr, args);
+	SubmitLabel(buffer, CompleteDisplayBufferFlip, nullptr, args);
 }
 
 void GraphicsRenderWriteAtEndOfPipeOnlyFlip(uint64_t submit_id, CommandBuffer* buffer, int handle,
@@ -403,7 +335,7 @@ void GraphicsRenderWriteAtEndOfPipeOnlyFlip(uint64_t submit_id, CommandBuffer* b
 	                     static_cast<uint32_t>(flip_mode), 0, static_cast<uint64_t>(flip_arg));
 
 	const uint64_t args[LABEL_ARGS_MAX] = {request_id};
-	SubmitLabel32(buffer, nullptr, 0, CompleteDisplayBufferFlip, nullptr, args);
+	SubmitLabel(buffer, CompleteDisplayBufferFlip, nullptr, args);
 }
 
 void GraphicsRenderTriggerEopEventAtEndOfPipe(CommandBuffer* buffer, uint32_t context_id) {
@@ -413,8 +345,8 @@ void GraphicsRenderTriggerEopEventAtEndOfPipe(CommandBuffer* buffer, uint32_t co
 
 	uint64_t args[LABEL_ARGS_MAX] = {static_cast<uint64_t>(context_id)};
 
-	SubmitLabel32(
-	    buffer, nullptr, 0, nullptr,
+	SubmitLabel(
+	    buffer, nullptr,
 	    [](const uint64_t* args) {
 		    EXIT_IF(g_render_ctx == nullptr);
 		    g_render_ctx->TriggerEopEvent(static_cast<uint32_t>(args[0]));
@@ -487,13 +419,6 @@ int GraphicsRenderDeleteEqEvent(LibKernel::EventQueue::KernelEqueue eq, int id) 
 	    eq, static_cast<uintptr_t>(id), LibKernel::EventQueue::KERNEL_EVFILT_GRAPHICS);
 
 	return result;
-}
-
-void GraphicsRenderClearGds(uint64_t dw_offset, uint32_t dw_num, uint32_t clear_value) {
-	EXIT_IF(g_render_ctx == nullptr);
-
-	g_render_ctx->GetGdsBuffer()->Clear(g_render_ctx->GetGraphicCtx(), dw_offset, dw_num,
-	                                    clear_value);
 }
 
 void GraphicsRenderReadGds(uint32_t* dst, uint32_t dw_offset, uint32_t dw_size) {

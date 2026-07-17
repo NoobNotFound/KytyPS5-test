@@ -87,25 +87,27 @@ public:
 	[[nodiscard]] int      GetQueue() const { return m_queue; }
 	VulkanCommandPool*     GetPool() { return m_pool; }
 	[[nodiscard]] bool     IsExecute() const { return m_execute; }
+	[[nodiscard]] uint64_t GetRecordingGeneration() const { return m_recording_generation; }
 
 private:
 	friend class BufferCache;
 
 	void RecycleDescriptorsAfterFence();
 
-	VulkanCommandPool*                m_pool            = nullptr;
-	uint32_t                          m_index           = static_cast<uint32_t>(-1);
-	int                               m_queue           = -1;
-	bool                              m_execute         = false;
-	bool                              m_fence_waited    = false;
-	uint64_t                          m_submit_seq      = 0;
-	uint32_t                          m_debug_op        = 0;
-	uint64_t                          m_debug_submit_id = 0;
-	uint32_t                          m_debug_arg0      = 0;
-	uint32_t                          m_debug_arg1      = 0;
-	uint32_t                          m_debug_arg2      = 0;
-	uint32_t                          m_debug_arg3      = 0;
-	uint64_t                          m_debug_arg4      = 0;
+	VulkanCommandPool*                m_pool                 = nullptr;
+	uint32_t                          m_index                = static_cast<uint32_t>(-1);
+	int                               m_queue                = -1;
+	bool                              m_execute              = false;
+	bool                              m_fence_waited         = false;
+	uint64_t                          m_submit_seq           = 0;
+	uint64_t                          m_recording_generation = 0;
+	uint32_t                          m_debug_op             = 0;
+	uint64_t                          m_debug_submit_id      = 0;
+	uint32_t                          m_debug_arg0           = 0;
+	uint32_t                          m_debug_arg1           = 0;
+	uint32_t                          m_debug_arg2           = 0;
+	uint32_t                          m_debug_arg3           = 0;
+	uint64_t                          m_debug_arg4           = 0;
 	std::vector<VulkanBuffer*>        m_delete_after_fence;
 	FenceResourceRetainer             m_fence_resources;
 	std::vector<VulkanDescriptorSet*> m_descriptor_sets_after_fence;
@@ -129,8 +131,8 @@ void RenderDispatchDirect(uint64_t submit_id, CommandBuffer* buffer, HW::Context
 void GraphicsRenderInit();
 void GraphicsRenderCreateContext();
 
-[[nodiscard]] bool GraphicsScaleReferenceClock(uint64_t host_ticks, uint64_t host_frequency,
-                                               uint64_t* value);
+[[nodiscard]] bool     GraphicsScaleReferenceClock(uint64_t host_ticks, uint64_t host_frequency,
+                                                   uint64_t* value);
 [[nodiscard]] uint64_t GraphicsRenderReadReferenceClock();
 
 [[nodiscard]] bool ResolveComputeImageClear(const ShaderComputeInputInfo& input, uint32_t group_x,
@@ -140,21 +142,22 @@ void GraphicsRenderCreateContext();
 [[nodiscard]] bool ResolveHtileClearTarget(const HW::DepthRenderTarget& target,
                                            uint64_t descriptor_size, HtileClearTarget* resolved);
 
-void GraphicsRenderWriteAtEndOfPipe64(uint64_t submit_id, CommandBuffer* buffer,
-                                      uint64_t* dst_gpu_addr, uint64_t value);
-void GraphicsRenderWriteAtEndOfPipeClockCounter(uint64_t submit_id, CommandBuffer* buffer,
-                                                uint64_t* dst_gpu_addr);
-void GraphicsRenderWriteAtEndOfPipeClockCounterWithWriteBack(uint64_t       submit_id,
-                                                             CommandBuffer* buffer,
-                                                             uint64_t*      dst_gpu_addr);
-void GraphicsRenderWriteAtEndOfPipe32(uint64_t submit_id, CommandBuffer* buffer,
-                                      uint32_t* dst_gpu_addr, uint32_t value);
-void GraphicsRenderWriteAtEndOfPipeGds32(uint64_t submit_id, CommandBuffer* buffer,
-                                         uint32_t* dst_gpu_addr, uint32_t dw_offset,
-                                         uint32_t dw_num);
+void     GraphicsRenderWriteAtEndOfPipe64(uint64_t submit_id, CommandBuffer* buffer,
+                                          uint64_t* dst_gpu_addr, uint64_t value);
+void     GraphicsRenderWriteAtEndOfPipeClockCounter(uint64_t submit_id, CommandBuffer* buffer,
+                                                    uint64_t* dst_gpu_addr, uint64_t value);
+void     GraphicsRenderWriteAtEndOfPipeClockCounterWithWriteBack(uint64_t       submit_id,
+                                                                 CommandBuffer* buffer,
+                                                                 uint64_t*      dst_gpu_addr,
+                                                                 uint64_t       value);
+void     GraphicsRenderWriteAtEndOfPipe32(uint64_t submit_id, CommandBuffer* buffer,
+                                          uint32_t* dst_gpu_addr, uint32_t value);
+void     GraphicsRenderWriteAtEndOfPipeGds32(uint64_t submit_id, CommandBuffer* buffer,
+                                             uint32_t* dst_gpu_addr, uint32_t dw_offset,
+                                             uint32_t dw_num);
 uint64_t GraphicsRenderPrepareDisplayBufferFlip(CommandBuffer* buffer, int handle, int index,
                                                 int flip_mode, int64_t flip_arg);
-void GraphicsRenderWriteAtEndOfPipeWithInterruptWriteBackFlip32(
+void     GraphicsRenderWriteAtEndOfPipeWithInterruptWriteBackFlip32(
     uint64_t submit_id, CommandBuffer* buffer, uint32_t* dst_gpu_addr, uint32_t value, int handle,
     int index, int flip_mode, int64_t flip_arg, uint64_t request_id);
 void GraphicsRenderWriteAtEndOfPipeWithFlip32(uint64_t submit_id, CommandBuffer* buffer,
@@ -193,7 +196,6 @@ int  GraphicsRenderDeleteEqEvent(LibKernel::EventQueue::KernelEqueue eq, int id)
 void GraphicsRenderTriggerAgcUserInterrupt();
 void GraphicsRenderTriggerEopEvent(uint32_t context_id);
 
-void GraphicsRenderClearGds(uint64_t dw_offset, uint32_t dw_num, uint32_t clear_value);
 void GraphicsRenderReadGds(uint32_t* dst, uint32_t dw_offset, uint32_t dw_size);
 
 } // namespace Libs::Graphics

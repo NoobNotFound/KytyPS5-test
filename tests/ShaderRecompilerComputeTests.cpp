@@ -8846,6 +8846,18 @@ void CheckSampledColorViews() {
           SelectStorageColorView(VK_FORMAT_R16_UINT, VK_FORMAT_R16_UINT,
                                  DstSel(4, 0, 0, 0)) == VulkanImage::VIEW_STORAGE,
           "R16_UINT R000 storage did not select the identity storage view");
+  Require("SampledColorViews", "storage R16 float R001 write mapping",
+          SelectStorageColorView(VK_FORMAT_R16_SFLOAT, VK_FORMAT_R16_SFLOAT,
+                                 DstSel(4, 0, 0, 1)) == VulkanImage::VIEW_STORAGE,
+          "R16_SFLOAT R001 storage did not select the identity storage view");
+  Require("SampledColorViews", "storage R32 float R001 write mapping",
+          SelectStorageColorView(VK_FORMAT_R32_SFLOAT, VK_FORMAT_R32_SFLOAT,
+                                 DstSel(4, 0, 0, 1)) == VulkanImage::VIEW_STORAGE,
+          "R32_SFLOAT R001 storage did not select the identity storage view");
+  Require("SampledColorViews", "storage R8 unorm R001 write mapping",
+          SelectStorageColorView(VK_FORMAT_R8_UNORM, VK_FORMAT_R8_UNORM,
+                                 DstSel(4, 0, 0, 1)) == VulkanImage::VIEW_STORAGE,
+          "R8_UNORM R001 storage did not select the identity storage view");
   ShaderRecompiler::IR::ImageResource storage_resource{};
   storage_resource.kind = ShaderRecompiler::IR::ResourceKind::StorageImage;
   storage_resource.dimension = ShaderRecompiler::Decoder::ImageDimension::Dim2D;
@@ -9013,14 +9025,6 @@ void CheckBufferCacheRangeMerge() {
                                             3) &&
               !CanMergeBufferCacheQueueMask(0, 64),
           "cross-queue or invalid queue ownership was accepted");
-  Require("BufferCacheRangeMerge", "readback queue ownership",
-          !CanReadbackBufferCacheQueueMask(0, 3) &&
-              CanReadbackBufferCacheQueueMask(uint64_t{1} << 3u, 3) &&
-              !CanReadbackBufferCacheQueueMask((uint64_t{1} << 2u) |
-                                                   (uint64_t{1} << 3u),
-                                               3) &&
-              !CanReadbackBufferCacheQueueMask(uint64_t{1} << 3u, 64),
-          "zero, cross-queue, or invalid readback ownership was accepted");
   std::printf("[host]    %-32s ok\n", "BufferCacheRangeMerge");
 }
 
@@ -9059,6 +9063,21 @@ ShaderRecompiler::IR::ImageResource BasicBgraStorageTextureResource() {
 
 ShaderTextureResource BasicBgraStorageTextureDescriptor() {
   return {{0x007c6500u, 0xc3800000u, 0x010dc1dfu, 0x91b00f2eu,
+           0x00000000u, 0x00700000u, 0x00000000u, 0x00000000u}};
+}
+
+ShaderTextureResource Ppsa02527R16FloatStorageTextureDescriptor() {
+  return {{0x00ce3500u, 0xc0d00000u, 0x010dc1dfu, 0x91b00204u,
+           0x00000000u, 0x00700000u, 0x00000000u, 0x00000000u}};
+}
+
+ShaderTextureResource Ppsa02527R32FloatStorageTextureDescriptor() {
+  return {{0x00cea900u, 0xc1600000u, 0x0086c0efu, 0x91b00204u,
+           0x00000000u, 0x00700000u, 0x00000000u, 0x00000000u}};
+}
+
+ShaderTextureResource Ppsa02527R8UnormStorageTextureDescriptor() {
+  return {{0x00c7d500u, 0xc0100000u, 0x0086c0efu, 0x91b00204u,
            0x00000000u, 0x00700000u, 0x00000000u, 0x00000000u}};
 }
 
@@ -9120,6 +9139,14 @@ ShaderTextureResource BasicUintVolumeStorageTextureDescriptor() {
   } else if (std::strcmp(kind, "bgra-read") == 0) {
     resource = BasicBgraStorageTextureResource();
     descriptor = BasicBgraStorageTextureDescriptor();
+    resource.read = true;
+  } else if (std::strcmp(kind, "r16-float-read") == 0) {
+    resource = BasicBgraStorageTextureResource();
+    descriptor = Ppsa02527R16FloatStorageTextureDescriptor();
+    resource.read = true;
+  } else if (std::strcmp(kind, "r8-unorm-read") == 0) {
+    resource = BasicBgraStorageTextureResource();
+    descriptor = Ppsa02527R8UnormStorageTextureDescriptor();
     resource.read = true;
   } else if (std::strcmp(kind, "yzwx-read") == 0) {
     resource = BasicLinearStorageTextureResource();
@@ -9203,6 +9230,42 @@ void CheckBasicStorageTextureDescriptor() {
           "PPSA02604 BGRA 2D storage descriptor fixture is malformed");
   ValidateStorageTexture(BasicBgraStorageTextureResource(), bgra, 0x870000);
 
+  const auto r16_float = Ppsa02527R16FloatStorageTextureDescriptor();
+  Require("BasicStorageTexture", "PPSA02527 R16F descriptor",
+          r16_float.Base40() == 0xce350000ull && r16_float.Width5() + 1u == 1920 &&
+              r16_float.Height5() + 1u == 1080 && r16_float.Depth() + 1u == 1 &&
+              r16_float.Format() ==
+                  Prospero::GpuEnumValue(Prospero::BufferFormat::k16Float) &&
+              r16_float.TileMode() ==
+                  Prospero::GpuEnumValue(Prospero::TileMode::kRenderTarget) &&
+              r16_float.DstSelXYZW() == DstSel(4, 0, 0, 1),
+          "PPSA02527 R16F 2D storage descriptor fixture is malformed");
+  ValidateStorageTexture(BasicBgraStorageTextureResource(), r16_float, 0x480000);
+
+  const auto r32_float = Ppsa02527R32FloatStorageTextureDescriptor();
+  Require("BasicStorageTexture", "PPSA02527 R32F descriptor",
+          r32_float.Base40() == 0xcea90000ull && r32_float.Width5() + 1u == 960 &&
+              r32_float.Height5() + 1u == 540 && r32_float.Depth() + 1u == 1 &&
+              r32_float.Format() ==
+                  Prospero::GpuEnumValue(Prospero::BufferFormat::k32Float) &&
+              r32_float.TileMode() ==
+                  Prospero::GpuEnumValue(Prospero::TileMode::kRenderTarget) &&
+              r32_float.DstSelXYZW() == DstSel(4, 0, 0, 1),
+          "PPSA02527 R32F 2D storage descriptor fixture is malformed");
+  ValidateStorageTexture(BasicBgraStorageTextureResource(), r32_float, 0x280000);
+
+  const auto r8_unorm = Ppsa02527R8UnormStorageTextureDescriptor();
+  Require("BasicStorageTexture", "PPSA02527 R8 UNORM descriptor",
+          r8_unorm.Base40() == 0xc7d50000ull && r8_unorm.Width5() + 1u == 960 &&
+              r8_unorm.Height5() + 1u == 540 && r8_unorm.Depth() + 1u == 1 &&
+              r8_unorm.Format() ==
+                  Prospero::GpuEnumValue(Prospero::BufferFormat::k8UNorm) &&
+              r8_unorm.TileMode() ==
+                  Prospero::GpuEnumValue(Prospero::TileMode::kRenderTarget) &&
+              r8_unorm.DstSelXYZW() == DstSel(4, 0, 0, 1),
+          "PPSA02527 R8 UNORM 2D storage descriptor fixture is malformed");
+  ValidateStorageTexture(BasicBgraStorageTextureResource(), r8_unorm, 0xc0000);
+
   const auto yzwx = BasicYzwxStorageTextureDescriptor();
   Require("BasicStorageTexture", "YZWX descriptor",
           yzwx.Base40() == 0x62780100ull && yzwx.Width5() + 1u == 8 &&
@@ -9269,7 +9332,8 @@ void CheckBasicStorageTextureDescriptor() {
           GetModuleFileNameA(nullptr, path, MAX_PATH) != 0,
           "GetModuleFileName failed");
   for (const char *kind : {"resource", "type", "tile", "mip", "swizzle",
-                           "linear-rgb1-read", "bgra-read", "yzwx-read", "yzwx-format",
+                           "linear-rgb1-read", "bgra-read", "r16-float-read", "r8-unorm-read",
+                           "yzwx-read", "yzwx-format",
                            "array-base-view", "reserved", "metadata", "uint-format",
                            "uint-resource-float-format", "depth-tile-read",
                            "depth-tile-extent"}) {
@@ -9783,10 +9847,13 @@ void CheckStorageTextureGpuOwnedRebindState() {
   tracker.ForEachUploadRange(base, size, true,
                              [](uint64_t, uint64_t) noexcept {}, []() noexcept {});
   uint64_t readable = 0;
+  uint64_t mapped = 0;
   MEMORY_BASIC_INFORMATION protection{};
   Require("StorageTextureGpuOwnedRebind", "owned",
           tracker.IsRegionGpuModified(base, size) && page_manager.IsMapped(base, size) &&
               (!HostMemoryQueryReadable(base, size, &readable) || readable < size) &&
+              HostMemoryQueryRange(base, size, HostMemoryAccess::Mapped, &mapped) &&
+              mapped == size &&
               VirtualQuery(memory, &protection, sizeof(protection)) != 0 &&
               protection.Protect == PAGE_NOACCESS,
           "GPU-owned storage pages remained host-readable or lost tracker identity");
@@ -9830,6 +9897,24 @@ void CheckStorageTextureGpuOwnedRebindState() {
 }
 
 void CheckStorageTextureSampledReuse() {
+  const auto image_2d = Prospero::GpuEnumValue(Prospero::ImageType::kColor2D);
+  const auto image_2d_array =
+      Prospero::GpuEnumValue(Prospero::ImageType::kColor2DArray);
+  const auto image_3d = Prospero::GpuEnumValue(Prospero::ImageType::kColor3D);
+  Require("StorageTextureSampledReuse", "view shapes",
+          SelectStorageSampledViewShape(image_2d, 1, 1) ==
+                  StorageSampledViewShape::Image2D &&
+              SelectStorageSampledViewShape(image_2d_array, 16, 16) ==
+                  StorageSampledViewShape::Image2DArray &&
+              SelectStorageSampledViewShape(image_3d, 16, 1) ==
+                  StorageSampledViewShape::Image3D &&
+              SelectStorageSampledViewShape(image_2d, 16, 1) ==
+                  StorageSampledViewShape::Unsupported &&
+              SelectStorageSampledViewShape(image_2d_array, 16, 1) ==
+                  StorageSampledViewShape::Unsupported &&
+              SelectStorageSampledViewShape(image_3d, 16, 16) ==
+                  StorageSampledViewShape::Unsupported,
+          "sampled storage view shape or backing-layer validation is incorrect");
   ImageInfo storage{};
   storage.address = 0x78650000;
   storage.size = 0x210000;

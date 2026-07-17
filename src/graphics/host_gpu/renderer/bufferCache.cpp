@@ -16,7 +16,6 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
-#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
@@ -36,27 +35,6 @@ constexpr uint64_t READBACK_CAPACITY =
 constexpr uint64_t AlignReadbackCopySize(uint64_t size) noexcept {
 	return (size + READBACK_COPY_ALIGNMENT - 1) & ~(READBACK_COPY_ALIGNMENT - 1);
 }
-
-constexpr bool ShouldLogCommandProcessorReadback(uint64_t serial) noexcept {
-	return serial <= 32 || (serial % 256) == 0;
-}
-
-struct CommandProcessorReadbackState {
-	BufferCache*                          cache        = nullptr;
-	PageFaultAccess                       access       = PageFaultAccess::Unknown;
-	uint64_t                              vaddr        = 0;
-	uint64_t                              size         = 0;
-	uint64_t                              page         = 0;
-	uint64_t                              serial       = 0;
-	uint64_t                              dirty_bytes  = 0;
-	uint64_t                              packed_bytes = 0;
-	uint32_t                              dirty_count  = 0;
-	std::chrono::steady_clock::time_point started {};
-	bool                                  installed = false;
-};
-
-thread_local CommandProcessorReadbackState g_command_processor_readback;
-std::atomic<uint64_t>                      g_command_processor_readback_serial {0};
 
 struct SharedVulkanBufferOwner {
 	explicit SharedVulkanBufferOwner(GraphicContext* context): ctx(context) {
@@ -192,24 +170,12 @@ bool CanMergeBufferCacheQueueMask(uint64_t queue_mask, uint32_t queue) noexcept 
 	return queue < 64 && (queue_mask & ~(uint64_t {1} << queue)) == 0;
 }
 
-bool CanReadbackBufferCacheQueueMask(uint64_t queue_mask, uint32_t queue) noexcept {
-	return queue < 64 && queue_mask == (uint64_t {1} << queue);
-}
-
 struct BufferCache::CachedBuffer {
 	uint64_t                      vaddr      = 0;
 	uint64_t                      size       = 0;
 	uint64_t                      queue_mask = 0;
 	GraphicContext*               ctx        = nullptr;
 	std::shared_ptr<VulkanBuffer> buffer;
-};
-
-struct BufferCache::CommandProcessorReadbackResources {
-	GraphicContext*                ctx   = nullptr;
-	int                            queue = -1;
-	VulkanBuffer                   buffer {};
-	void*                          mapped = nullptr;
-	std::unique_ptr<CommandBuffer> command;
 };
 
 struct BufferCache::ReadbackWorker {
@@ -305,20 +271,20 @@ struct BufferCache::ReadbackWorker {
 	}
 
 	void Request(PageFaultAccess fault_access, uint64_t fault_vaddr, uint64_t fault_size) noexcept {
-		const bool submissions_prepaused_now = GraphicsRunSubmissionLockHeld();
+		const bool command_thread            = GraphicsRunIsCommandProcessorThread();
+		const bool submissions_prepaused_now = GraphicsRunSubmissionLockHeld() || command_thread;
 		const bool unsafe_gpu_lock = GraphicsRunGpuLockHeld() && !submissions_prepaused_now;
-		if (GraphicsRunIsCommandProcessorThread() || unsafe_gpu_lock || LabelInCallback() ||
-		    g_cache_lock_owner != nullptr || ctx == nullptr || command == nullptr ||
-		    mapped == nullptr || readback.buffer == nullptr) {
+		if (unsafe_gpu_lock || LabelInCallback() || g_cache_lock_owner != nullptr ||
+		    ctx == nullptr || command == nullptr || mapped == nullptr ||
+		    readback.buffer == nullptr) {
 			EXIT("BufferCache: unsafe readback request context, command_thread=%d "
 			     "submission_lock=%d "
 			     "gpu_lock=%d label_callback=%d cache_lock=%p ctx=%p command=%p mapped=%p "
 			     "buffer=%p\n",
-			     GraphicsRunIsCommandProcessorThread(), GraphicsRunSubmissionLockHeld(),
-			     GraphicsRunGpuLockHeld(), LabelInCallback(),
-			     static_cast<const void*>(g_cache_lock_owner), static_cast<const void*>(ctx),
-			     static_cast<const void*>(command.get()), static_cast<const void*>(mapped),
-			     static_cast<const void*>(readback.buffer));
+			     command_thread, GraphicsRunSubmissionLockHeld(), GraphicsRunGpuLockHeld(),
+			     LabelInCallback(), static_cast<const void*>(g_cache_lock_owner),
+			     static_cast<const void*>(ctx), static_cast<const void*>(command.get()),
+			     static_cast<const void*>(mapped), static_cast<const void*>(readback.buffer));
 		}
 		State expected = State::Idle;
 		while (!state.compare_exchange_weak(expected, State::Claimed, std::memory_order_acq_rel)) {
@@ -584,18 +550,6 @@ BufferCache::BufferCache(PageManager& page_manager, ResourceMutex& resource_mute
 
 BufferCache::~BufferCache() {
 	m_readback.reset();
-	if (m_cp_readback_resources != nullptr) {
-		auto& resources = *m_cp_readback_resources;
-		resources.command.reset();
-		if (resources.mapped != nullptr) {
-			VulkanUnmapMemory(resources.ctx, &resources.buffer.memory);
-			resources.mapped = nullptr;
-		}
-		if (resources.buffer.buffer != nullptr) {
-			VulkanDeleteBuffer(resources.ctx, &resources.buffer);
-		}
-		m_cp_readback_resources.reset();
-	}
 	if (!m_gpu_modified_ranges.Empty()) {
 		EXIT("BufferCache: destroyed with pending GPU-modified ranges\n");
 	}
@@ -623,14 +577,9 @@ bool BufferCache::InvalidateMemory(PageFaultAccess access, uint64_t vaddr, uint6
 	switch (phase) {
 		case PageFaultPhase::Invalidate: break;
 		case PageFaultPhase::Complete:
-			return CompleteCommandProcessorReadback(access, vaddr, size) ||
-			       m_readback->Complete(access, vaddr, size) ||
+			return m_readback->Complete(access, vaddr, size) ||
 			       m_memory_tracker.CompleteCpuFault(vaddr, size, access, false);
-		case PageFaultPhase::Release:
-			if (!ReleaseCommandProcessorReadback(access, vaddr, size)) {
-				m_readback->Release(access, vaddr, size);
-			}
-			return true;
+		case PageFaultPhase::Release: m_readback->Release(access, vaddr, size); return true;
 		default:
 			EXIT("BufferCache: unsupported page-fault phase %u\n", static_cast<uint32_t>(phase));
 	}
@@ -639,242 +588,9 @@ bool BufferCache::InvalidateMemory(PageFaultAccess access, uint64_t vaddr, uint6
 		return action == CpuFaultAction::Continue;
 	}
 	if (GraphicsRunIsCommandProcessorThread()) {
-		if (!GraphicsRunIsCommandProcessorGuestAccess()) {
-			EXIT("BufferCache: command-processor fault outside a coherent guest-memory access, "
-			     "addr=0x%016" PRIx64 " size=0x%016" PRIx64 "\n",
-			     vaddr, size);
-		}
-		RequestCommandProcessorReadback(access, vaddr, size);
-	} else {
-		m_readback->Request(access, vaddr, size);
+		GraphicsRunFinishCommandProcessors();
 	}
-	return true;
-}
-
-void BufferCache::RequestCommandProcessorReadback(PageFaultAccess access, uint64_t vaddr,
-                                                  uint64_t size) {
-	if (!GraphicsRunIsCommandProcessorThread() || g_command_processor_readback.cache != nullptr) {
-		EXIT("BufferCache: invalid nested command-processor readback\n");
-	}
-	const auto serial =
-	    g_command_processor_readback_serial.fetch_add(1, std::memory_order_relaxed) + 1;
-	if (serial == 0) {
-		EXIT("BufferCache: command-processor readback serial overflow\n");
-	}
-	const bool log_detail = ShouldLogCommandProcessorReadback(serial);
-	if (log_detail) {
-		LOGF("BufferCache: command-processor readback request serial=%" PRIu64 " addr=0x%016" PRIx64
-		     " size=0x%016" PRIx64 " access=%u poll=%d\n",
-		     serial, vaddr, size, static_cast<uint32_t>(access), GraphicsRunIsGuestMemoryPoll());
-		Log::Flush();
-	}
-	const auto page  = vaddr & ~(TRACKER_PAGE_SIZE - 1);
-	const auto queue = static_cast<uint32_t>(GraphicsRunBeginCommandProcessorReadback());
-	if (log_detail) {
-		LOGF("BufferCache: command-processor queue synchronized serial=%" PRIu64
-		     " queue=%u page=0x%016" PRIx64 "\n",
-		     serial, queue, page);
-		Log::Flush();
-	}
-	if (g_cache_lock_owner != nullptr) {
-		EXIT("BufferCache: command-processor readback entered with a cache lock\n");
-	}
-	g_cache_lock_owner = this;
-	m_mutex.Lock();
-	if (log_detail) {
-		LOGF("BufferCache: command-processor cache locked serial=%" PRIu64 " page=0x%016" PRIx64
-		     "\n",
-		     serial, page);
-		Log::Flush();
-	}
-
-	auto it = m_buffers.upper_bound(vaddr);
-	if (it == m_buffers.begin()) {
-		EXIT("BufferCache: command-processor readback address has no cached buffer, "
-		     "addr=0x%016" PRIx64 "\n",
-		     vaddr);
-	}
-	--it;
-	auto& cached = *it->second;
-	if (vaddr < cached.vaddr || vaddr >= cached.vaddr + cached.size || page < cached.vaddr ||
-	    TRACKER_PAGE_SIZE > cached.size - (page - cached.vaddr) || cached.ctx == nullptr ||
-	    cached.buffer == nullptr || cached.buffer->buffer == nullptr) {
-		EXIT("BufferCache: invalid command-processor readback owner, fault=0x%016" PRIx64
-		     " page=0x%016" PRIx64 " buffer=0x%016" PRIx64 "+0x%016" PRIx64 "\n",
-		     vaddr, page, cached.vaddr, cached.size);
-	}
-	if (!CanReadbackBufferCacheQueueMask(cached.queue_mask, queue)) {
-		EXIT("BufferCache: command-processor readback cannot synchronize cross-queue ownership, "
-		     "addr=0x%016" PRIx64 " used_queues=0x%016" PRIx64 " current_queue=%u\n",
-		     vaddr, cached.queue_mask, queue);
-	}
-	const auto dirty = m_gpu_modified_ranges.Intersections(page, TRACKER_PAGE_SIZE);
-	if (dirty.empty()) {
-		EXIT("BufferCache: command-processor GPU-dirty page has no dirty byte ranges, "
-		     "page=0x%016" PRIx64 "\n",
-		     page);
-	}
-	ValidateDirtyPages(m_gpu_modified_ranges, page, TRACKER_PAGE_SIZE, "command-processor");
-	if (m_cp_readback_resources == nullptr) {
-		auto resources                    = std::make_unique<CommandProcessorReadbackResources>();
-		resources->ctx                    = cached.ctx;
-		resources->buffer.usage           = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-		resources->buffer.memory.property = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-		                                    VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
-		                                    VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
-		VulkanCreateBuffer(cached.ctx, READBACK_CAPACITY, &resources->buffer);
-		VulkanMapMemory(cached.ctx, &resources->buffer.memory, &resources->mapped);
-		m_cp_readback_resources = std::move(resources);
-	}
-	auto& resources = *m_cp_readback_resources;
-	if (resources.ctx != cached.ctx || resources.mapped == nullptr ||
-	    resources.buffer.buffer == nullptr) {
-		EXIT("BufferCache: invalid command-processor readback resources\n");
-	}
-	if (queue >= GraphicContext::QUEUES_NUM || cached.ctx->queues[queue].family == UINT32_MAX ||
-	    cached.ctx->queues[queue].vk_queue == nullptr) {
-		EXIT("BufferCache: command-processor readback has invalid Vulkan queue %u\n", queue);
-	}
-	if (resources.command == nullptr || resources.queue != static_cast<int>(queue)) {
-		resources.command.reset();
-		resources.command = std::make_unique<CommandBuffer>(static_cast<int>(queue));
-		resources.queue   = static_cast<int>(queue);
-	}
-	if (resources.command->IsInvalid() ||
-	    resources.command->GetQueue() != static_cast<int>(queue)) {
-		EXIT("BufferCache: failed to initialize owning-queue readback command buffer, queue=%u\n",
-		     queue);
-	}
-	if (dirty.size() > ReadbackWorker::MAX_RANGES) {
-		EXIT("BufferCache: too many command-processor dirty ranges, page=0x%016" PRIx64
-		     " count=%" PRIu64 " limit=%u\n",
-		     page, static_cast<uint64_t>(dirty.size()), ReadbackWorker::MAX_RANGES);
-	}
-	std::array<VkBufferCopy, ReadbackWorker::MAX_RANGES>          copies {};
-	std::array<VkBufferMemoryBarrier, ReadbackWorker::MAX_RANGES> barriers {};
-	uint64_t                                                      dirty_bytes  = 0;
-	uint64_t                                                      packed_bytes = 0;
-	uint32_t                                                      dirty_count  = 0;
-	for (const auto& range: dirty) {
-		if ((range.address - cached.vaddr) % 4 != 0 || range.size % 4 != 0) {
-			EXIT("BufferCache: invalid command-processor dirty range, addr=0x%016" PRIx64
-			     " size=0x%016" PRIx64 " page=0x%016" PRIx64 " packed=0x%016" PRIx64 "\n",
-			     range.address, range.size, page, dirty_bytes);
-		}
-		copies[dirty_count]         = {.srcOffset = range.address - cached.vaddr,
-		                               .dstOffset = packed_bytes,
-		                               .size      = range.size};
-		auto& barrier               = barriers[dirty_count];
-		barrier.sType               = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-		barrier.srcAccessMask       = VK_ACCESS_MEMORY_WRITE_BIT;
-		barrier.dstAccessMask       = VK_ACCESS_TRANSFER_READ_BIT;
-		barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-		barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-		barrier.buffer              = cached.buffer->buffer;
-		barrier.offset              = copies[dirty_count].srcOffset;
-		barrier.size                = range.size;
-		const auto slot_size        = AlignReadbackCopySize(range.size);
-		if (packed_bytes > READBACK_CAPACITY || slot_size > READBACK_CAPACITY - packed_bytes) {
-			EXIT("BufferCache: aligned command-processor readback exceeds persistent capacity, "
-			     "packed=%" PRIu64 " size=%" PRIu64 " capacity=%" PRIu64 "\n",
-			     packed_bytes, slot_size, READBACK_CAPACITY);
-		}
-		packed_bytes += slot_size;
-		dirty_bytes += range.size;
-		dirty_count++;
-	}
-	if (dirty_count == 0 || dirty_bytes == 0) {
-		EXIT("BufferCache: command-processor readback produced no packed ranges\n");
-	}
-	const auto started = std::chrono::steady_clock::now();
-	if (log_detail) {
-		LOGF("BufferCache: command-processor readback begin serial=%" PRIu64
-		     " queue=%u page=0x%016" PRIx64 " ranges=%u bytes=%" PRIu64 " packed=%" PRIu64 "\n",
-		     serial, queue, page, dirty_count, dirty_bytes, packed_bytes);
-		Log::Flush();
-	}
-	auto* vk_command = resources.command->GetPool()->buffers[resources.command->GetIndex()];
-	resources.command->Begin();
-	vkCmdPipelineBarrier(vk_command, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-	                     VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, dirty_count,
-	                     barriers.data(), 0, nullptr);
-	vkCmdCopyBuffer(vk_command, cached.buffer->buffer, resources.buffer.buffer, dirty_count,
-	                copies.data());
-	resources.command->End();
-	resources.command->Execute();
-	resources.command->WaitForFenceAndReset();
-	if (log_detail) {
-		LOGF("BufferCache: command-processor GPU copy complete serial=%" PRIu64 "\n", serial);
-		Log::Flush();
-	}
-	for (uint32_t i = 0; i < dirty_count; i++) {
-		Libs::LibKernel::Memory::WriteBacking(
-		    dirty[i].address, static_cast<const uint8_t*>(resources.mapped) + copies[i].dstOffset,
-		    dirty[i].size);
-	}
-	g_command_processor_readback = {.cache        = this,
-	                                .access       = access,
-	                                .vaddr        = vaddr,
-	                                .size         = size,
-	                                .page         = page,
-	                                .serial       = serial,
-	                                .dirty_bytes  = dirty_bytes,
-	                                .packed_bytes = packed_bytes,
-	                                .dirty_count  = dirty_count,
-	                                .started      = started};
-}
-
-bool BufferCache::CompleteCommandProcessorReadback(PageFaultAccess access, uint64_t vaddr,
-                                                   uint64_t size) noexcept {
-	auto& pending = g_command_processor_readback;
-	if (pending.cache == nullptr) {
-		return false;
-	}
-	if (pending.cache != this || pending.access != access || pending.vaddr != vaddr ||
-	    pending.size != size || pending.installed) {
-		EXIT("BufferCache: mismatched active command-processor readback completion\n");
-	}
-	if (!m_memory_tracker.CompleteCpuFault(vaddr, size, access, true)) {
-		EXIT("BufferCache: failed to complete command-processor readback, addr=0x%016" PRIx64
-		     " size=0x%016" PRIx64 " access=%u\n",
-		     vaddr, size, static_cast<uint32_t>(access));
-	}
-	m_gpu_modified_ranges.Subtract(pending.page, TRACKER_PAGE_SIZE);
-	pending.installed = true;
-	if (ShouldLogCommandProcessorReadback(pending.serial)) {
-		LOGF("BufferCache: command-processor readback complete serial=%" PRIu64
-		     " page=0x%016" PRIx64 " ranges=%u bytes=%" PRIu64 "\n",
-		     pending.serial, pending.page, pending.dirty_count, pending.dirty_bytes);
-	}
-	return true;
-}
-
-bool BufferCache::ReleaseCommandProcessorReadback(PageFaultAccess access, uint64_t vaddr,
-                                                  uint64_t size) noexcept {
-	auto& pending = g_command_processor_readback;
-	if (pending.cache == nullptr) {
-		return false;
-	}
-	if (pending.cache != this || pending.access != access || pending.vaddr != vaddr ||
-	    pending.size != size || !pending.installed) {
-		EXIT("BufferCache: mismatched active command-processor readback release\n");
-	}
-	const auto serial        = pending.serial;
-	const auto page          = pending.page;
-	const auto dirty_count   = pending.dirty_count;
-	const auto dirty_bytes   = pending.dirty_bytes;
-	const auto elapsed_micro = std::chrono::duration_cast<std::chrono::microseconds>(
-	                               std::chrono::steady_clock::now() - pending.started)
-	                               .count();
-	pending                  = {};
-	m_mutex.Unlock();
-	g_cache_lock_owner = nullptr;
-	GraphicsRunEndCommandProcessorReadback();
-	if (ShouldLogCommandProcessorReadback(serial)) {
-		LOGF("BufferCache: command-processor readback release serial=%" PRIu64 " page=0x%016" PRIx64
-		     " ranges=%u bytes=%" PRIu64 " elapsed_us=%" PRIi64 "\n",
-		     serial, page, dirty_count, dirty_bytes, static_cast<int64_t>(elapsed_micro));
-	}
+	m_readback->Request(access, vaddr, size);
 	return true;
 }
 

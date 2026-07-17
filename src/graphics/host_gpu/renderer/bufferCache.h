@@ -39,7 +39,6 @@ struct BufferCacheRange {
 [[nodiscard]] bool MergeOverlappingBufferCacheRange(BufferCacheRange* merged,
                                                     BufferCacheRange  candidate) noexcept;
 [[nodiscard]] bool CanMergeBufferCacheQueueMask(uint64_t queue_mask, uint32_t queue) noexcept;
-[[nodiscard]] bool CanReadbackBufferCacheQueueMask(uint64_t queue_mask, uint32_t queue) noexcept;
 
 class BufferCache {
 public:
@@ -61,11 +60,9 @@ public:
 	// Emulator-owned, CPU-current scratch only. Guest ranges must use ObtainBuffer so page
 	// ownership is resolved before any CPU access.
 	[[nodiscard]] bool UploadHostData(CommandBuffer* command, GraphicContext* ctx, const void* src,
-	                                  uint64_t size, uint64_t alignment,
-	                                  VulkanBuffer** out_buffer, uint64_t* out_offset,
-	                                  uint64_t* out_range);
-	[[nodiscard]] VulkanBuffer*         ObtainNullBuffer(CommandBuffer* command,
-	                                                     GraphicContext* ctx);
+	                                  uint64_t size, uint64_t alignment, VulkanBuffer** out_buffer,
+	                                  uint64_t* out_offset, uint64_t* out_range);
+	[[nodiscard]] VulkanBuffer* ObtainNullBuffer(CommandBuffer* command, GraphicContext* ctx);
 	[[nodiscard]] BufferImageCopySource ObtainBufferForImage(uint64_t vaddr, uint64_t size);
 	void FillBuffer(CommandBuffer* command, GraphicContext* ctx, uint64_t vaddr, uint64_t size,
 	                uint32_t value);
@@ -84,19 +81,12 @@ public:
 private:
 	struct CachedBuffer;
 	struct ReadbackWorker;
-	struct CommandProcessorReadbackResources;
-	void RequestCommandProcessorReadback(PageFaultAccess access, uint64_t vaddr, uint64_t size);
-	[[nodiscard]] bool CompleteCommandProcessorReadback(PageFaultAccess access, uint64_t vaddr,
-	                                                    uint64_t size) noexcept;
-	[[nodiscard]] bool ReleaseCommandProcessorReadback(PageFaultAccess access, uint64_t vaddr,
-	                                                   uint64_t size) noexcept;
 
 	Common::Mutex                                     m_mutex;
 	std::vector<VulkanBuffer*>                        m_delete_later;
 	std::shared_ptr<VulkanBuffer>                     m_null_buffer;
 	std::map<uint64_t, std::unique_ptr<CachedBuffer>> m_buffers;
 	std::unique_ptr<ReadbackWorker>                   m_readback;
-	std::unique_ptr<CommandProcessorReadbackResources> m_cp_readback_resources;
 	RangeSet                                          m_gpu_modified_ranges;
 	MemoryTracker                                     m_memory_tracker;
 	PageManager&                                      m_page_manager;

@@ -8,7 +8,6 @@
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/guest_gpu/tile.h"
 #include "graphics/host_gpu/graphicContext.h"
-#include "graphics/host_gpu/hostMemory.h"
 #include "graphics/host_gpu/objects/label.h"
 #include "graphics/host_gpu/objects/textureCommon.h"
 #include "graphics/host_gpu/renderer/bufferCache.h"
@@ -232,14 +231,15 @@ struct TextureCache::ReadbackWorker {
 	}
 
 	void Request(PageFaultAccess fault_access, uint64_t fault_vaddr, uint64_t fault_size) noexcept {
-		const bool submissions_prepaused_now = GraphicsRunSubmissionLockHeld();
+		const bool command_thread            = GraphicsRunIsCommandProcessorThread();
+		const bool submissions_prepaused_now = GraphicsRunSubmissionLockHeld() || command_thread;
 		const bool unsafe_gpu_lock = GraphicsRunGpuLockHeld() && !submissions_prepaused_now;
 		if ((fault_access != PageFaultAccess::Read && fault_access != PageFaultAccess::Write) ||
-		    GraphicsRunIsCommandProcessorThread() || unsafe_gpu_lock || LabelInCallback() ||
-		    g_texture_cache_lock_owner != nullptr || g_texture_fault_owner != &cache) {
+		    unsafe_gpu_lock || LabelInCallback() || g_texture_cache_lock_owner != nullptr ||
+		    g_texture_fault_owner != &cache) {
 			EXIT("TextureCache: unsafe image readback request, access=%u command_thread=%d "
 			     "submission_lock=%d gpu_lock=%d label_callback=%d cache_lock=%p fault_owner=%p\n",
-			     static_cast<uint32_t>(fault_access), GraphicsRunIsCommandProcessorThread(),
+			     static_cast<uint32_t>(fault_access), command_thread,
 			     GraphicsRunSubmissionLockHeld(), GraphicsRunGpuLockHeld(), LabelInCallback(),
 			     g_texture_cache_lock_owner, g_texture_fault_owner);
 		}
@@ -1557,14 +1557,12 @@ VkImageView TextureCache::GetRenderTargetStorageView(GraphicContext*           c
 VkImageView TextureCache::GetStorageTextureSampledView(GraphicContext*            ctx,
                                                        StorageTextureVulkanImage* image,
                                                        const ImageInfo&           info) {
-	const bool image_2d =
-	    info.type == Prospero::GpuEnumValue(Prospero::ImageType::kColor2D) && info.depth == 1;
-	const bool image_3d =
-	    info.type == Prospero::GpuEnumValue(Prospero::ImageType::kColor3D) && info.depth != 0;
-	if (ctx == nullptr || image == nullptr || image->image == nullptr || (!image_2d && !image_3d) ||
-	    info.base_array != 0 || info.levels != image->mip_levels ||
-	    info.base_level >= info.levels || info.view_levels == 0 ||
-	    info.base_level + info.view_levels > info.levels) {
+	const auto shape =
+	    SelectStorageSampledViewShape(info.type, info.depth, image != nullptr ? image->layers : 0);
+	if (ctx == nullptr || image == nullptr || image->image == nullptr ||
+	    shape == StorageSampledViewShape::Unsupported || info.base_array != 0 ||
+	    info.levels != image->mip_levels || info.base_level >= info.levels ||
+	    info.view_levels == 0 || info.base_level + info.view_levels > info.levels) {
 		EXIT("TextureCache: invalid sampled view of storage texture, image=%p type=%u depth=%u"
 		     " base=%u levels=%u view_levels=%u image_levels=%u base_array=%u\n",
 		     static_cast<const void*>(image), info.type, info.depth, info.base_level, info.levels,
@@ -1590,18 +1588,21 @@ VkImageView TextureCache::GetStorageTextureSampledView(GraphicContext*          
 	usage.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO;
 	usage.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
 	VkImageViewCreateInfo create {};
-	create.sType                         = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-	create.pNext                         = &usage;
-	create.image                         = image->image;
-	create.viewType                      = image_3d ? VK_IMAGE_VIEW_TYPE_3D : VK_IMAGE_VIEW_TYPE_2D;
-	create.format                        = view_format;
-	create.components                    = TextureGetComponentMapping(info.swizzle);
-	create.subresourceRange.aspectMask   = VK_IMAGE_ASPECT_COLOR_BIT;
-	create.subresourceRange.baseMipLevel = info.base_level;
-	create.subresourceRange.levelCount   = info.view_levels;
+	create.sType    = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+	create.pNext    = &usage;
+	create.image    = image->image;
+	create.viewType = shape == StorageSampledViewShape::Image3D        ? VK_IMAGE_VIEW_TYPE_3D
+	                  : shape == StorageSampledViewShape::Image2DArray ? VK_IMAGE_VIEW_TYPE_2D_ARRAY
+	                                                                   : VK_IMAGE_VIEW_TYPE_2D;
+	create.format   = view_format;
+	create.components                      = TextureGetComponentMapping(info.swizzle);
+	create.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+	create.subresourceRange.baseMipLevel   = info.base_level;
+	create.subresourceRange.levelCount     = info.view_levels;
 	create.subresourceRange.baseArrayLayer = 0;
-	create.subresourceRange.layerCount     = 1;
-	VkImageView view                       = nullptr;
+	create.subresourceRange.layerCount =
+	    shape == StorageSampledViewShape::Image2DArray ? info.depth : 1;
+	VkImageView view   = nullptr;
 	const auto  result = vkCreateImageView(ctx->device, &create, nullptr, &view);
 	if (result != VK_SUCCESS || view == nullptr) {
 		EXIT("TextureCache: failed to create sampled view of storage texture, result=%d"
@@ -1922,15 +1923,6 @@ VulkanImage* TextureCache::FindTexture(CommandBuffer* command, GraphicContext* c
 			     cached->gpu_modified, cached->ctx == ctx);
 		}
 	}
-	uint64_t readable = 0;
-	if (!HostMemoryQueryReadable(info.address, info.size, &readable) || readable < info.size) {
-		EXIT("TextureCache: new sampled image has unreadable guest backing, addr=0x%016" PRIx64
-		     " size=0x%016" PRIx64 " readable=0x%016" PRIx64
-		     " format=%u extent=%ux%ux%u pitch=%u levels=%u tile=%u type=%u\n",
-		     info.address, info.size, readable, info.format, info.width, info.height, info.depth,
-		     info.pitch, info.levels, info.tile, info.type);
-	}
-
 	m_images.reserve(m_images.size() + 1);
 	auto cached   = std::make_shared<CachedImage>();
 	cached->kind  = CachedImage::Kind::Texture;
@@ -2053,13 +2045,6 @@ StorageTextureVulkanImage* TextureCache::FindStorageTexture(CommandBuffer*   com
 	}
 
 	RetireStoragePageNeighbors(ctx, info);
-	uint64_t readable = 0;
-	if (!HostMemoryQueryReadable(info.address, info.size, &readable) || readable < info.size) {
-		EXIT("TextureCache: new storage image has unreadable guest backing, addr=0x%016" PRIx64
-		     " size=0x%016" PRIx64 " readable=0x%016" PRIx64 "\n",
-		     info.address, info.size, readable);
-	}
-
 	m_images.reserve(m_images.size() + 1);
 	auto cached   = std::make_shared<CachedImage>();
 	cached->kind  = CachedImage::Kind::StorageTexture;
@@ -3635,6 +3620,9 @@ bool TextureCache::InvalidateMemory(PageFaultAccess access, uint64_t vaddr, uint
 		}
 
 		if (needs_readback) {
+			if (GraphicsRunIsCommandProcessorThread()) {
+				GraphicsRunFinishCommandProcessors();
+			}
 			m_readback->Request(access, vaddr, size);
 			action = m_memory_tracker.BeginCpuFault(vaddr, size, access);
 			if (action != CpuFaultAction::Download) {

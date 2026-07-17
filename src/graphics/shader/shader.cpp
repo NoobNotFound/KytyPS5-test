@@ -12,7 +12,6 @@
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/guest_gpu/gpu_defs.h"
-#include "graphics/host_gpu/hostMemory.h"
 #include "graphics/shader/recompiler/ShaderDecoder.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
 #include "graphics/shader/shaderVertexMetadata.h"
@@ -785,31 +784,6 @@ static bool ShaderGetStaticInputInfoVS(const HW::VertexShaderInfo* regs,
 			     shader_addr);
 			return false;
 		}
-		uint32_t max_semantic = 0;
-		for (uint32_t i = 0; i < metadata.input_semantics_count; i++) {
-			max_semantic =
-			    std::max(max_semantic, static_cast<uint32_t>(metadata.input_semantics[i].semantic));
-		}
-		if (!HostMemoryRangeIsReadable(reinterpret_cast<uint64_t>(attrib),
-		                               static_cast<uint64_t>(max_semantic + 1) *
-		                                   sizeof(uint32_t))) {
-			LOGF("ShaderGetInputInfoVS(): unreadable vertex attribute table shader=0x%016" PRIx64
-			     "\n",
-			     shader_addr);
-			return false;
-		}
-		uint32_t max_buffer = 0;
-		for (uint32_t i = 0; i < metadata.input_semantics_count; i++) {
-			max_buffer = std::max(max_buffer, attrib[metadata.input_semantics[i].semantic] & 0x1fu);
-		}
-		if (!HostMemoryRangeIsReadable(reinterpret_cast<uint64_t>(buffer),
-		                               static_cast<uint64_t>(max_buffer + 1) * 4 *
-		                                   sizeof(uint32_t))) {
-			LOGF("ShaderGetInputInfoVS(): unreadable vertex buffer table shader=0x%016" PRIx64 "\n",
-			     shader_addr);
-			return false;
-		}
-
 		ShaderApplyAttribSemantics(info, metadata.input_semantics.data(),
 		                           metadata.input_semantics_count, attrib, buffer);
 		ShaderDetectBuffers(info);
