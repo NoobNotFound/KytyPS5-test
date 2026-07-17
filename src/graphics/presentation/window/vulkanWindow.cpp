@@ -43,6 +43,7 @@
 #include <cstring>
 #include <fmt/format.h>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 #include <vulkan/vk_enum_string_helper.h>
@@ -233,6 +234,49 @@ static VulkanQueues VulkanFindQueues(VkPhysicalDevice device, VkSurfaceKHR surfa
 	select_queues(compute_num, [](const auto& q) { return q.compute; }, qs.compute);
 	select_queues(transfer_num, [](const auto& q) { return q.transfer; }, qs.transfer);
 	select_queues(present_num, [](const auto& q) { return q.present; }, qs.present);
+
+	// NOTE (macOS/MoltenVK patch): Apple Silicon GPUs (through MoltenVK) commonly expose
+	// exactly one Vulkan queue in one queue family - but that single queue reports
+	// graphics+compute+transfer+present capability all at once. The exclusive
+	// (erase-on-select) allocation above hands that one queue to "graphics" and leaves
+	// compute/transfer/present with nothing, even though the same queue could legally
+	// serve all four roles. Kyty already supports several logical queue roles sharing one
+	// physical VkQueue (see the mutex-sharing loop over queues[] in VulkanCreate), so
+	// backfill any role that came up short by reusing an already-selected queue with a
+	// matching capability bit instead of requiring a dedicated queue per role.
+	auto backfill_queue = [&qs](auto matches) -> std::optional<QueueInfo> {
+		for (const auto* selected: {&qs.graphics, &qs.compute, &qs.transfer, &qs.present}) {
+			for (const auto& q: *selected) {
+				if (matches(q)) {
+					return q;
+				}
+			}
+		}
+		return std::nullopt;
+	};
+
+	if (qs.graphics.empty() && graphics_num > 0) {
+		if (auto q = backfill_queue([](const auto& q) { return q.graphics; })) {
+			qs.graphics.push_back(*q);
+		}
+	}
+	while (qs.compute.size() < compute_num) {
+		auto q = backfill_queue([](const auto& q) { return q.compute; });
+		if (!q) {
+			break;
+		}
+		qs.compute.push_back(*q);
+	}
+	if (qs.transfer.empty() && transfer_num > 0) {
+		if (auto q = backfill_queue([](const auto& q) { return q.transfer; })) {
+			qs.transfer.push_back(*q);
+		}
+	}
+	if (qs.present.empty() && present_num > 0) {
+		if (auto q = backfill_queue([](const auto& q) { return q.present; })) {
+			qs.present.push_back(*q);
+		}
+	}
 
 	return qs;
 }
