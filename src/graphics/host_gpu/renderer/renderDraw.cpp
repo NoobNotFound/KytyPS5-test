@@ -347,21 +347,13 @@ static void LogDrawInputState(const RenderColorInfo&       color,
 	}
 }
 
-static void VulkanCmdSetColorWriteEnableEXT(GraphicContext* ctx, VkCommandBuffer command_buffer,
-                                            uint32_t        attachment_count,
-                                            const VkBool32* p_color_write_enables) {
-	EXIT_IF(ctx == nullptr);
-	EXIT_IF(ctx->instance == nullptr);
-
-	static auto func = reinterpret_cast<PFN_vkCmdSetColorWriteEnableEXT>(
-	    vkGetInstanceProcAddr(ctx->instance, "vkCmdSetColorWriteEnableEXT"));
-
-	if (func != nullptr) {
-		func(command_buffer, attachment_count, p_color_write_enables);
-	} else {
-		EXIT("vkCmdSetColorWriteEnableEXT not present\n");
-	}
-}
+// NOTE (macOS/MoltenVK patch): VulkanCmdSetColorWriteEnableEXT() removed -
+// vkCmdSetColorWriteEnableEXT does not exist on MoltenVK (VK_EXT_color_write_enable is
+// unimplemented there), and the old EXIT("...not present") fallback would abort every
+// frame. The static VkPipelineColorBlendAttachmentState.colorWriteMask baked into each
+// pipeline (see shaders.cpp / pipelineCache.cpp, both driven by the same render-target
+// mask as color_write_enable below) already reproduces the same per-target write-enable
+// behaviour, so no runtime replacement call is needed here.
 
 static PipelineDynamicParameters BuildGraphicsDynamicParams(const HW::Context&     ctx,
                                                             const RenderColorInfo* colors,
@@ -456,12 +448,11 @@ static void SetDynamicParams(VkCommandBuffer                  vk_buffer,
 		                         dynamic_params.stencil_back.reference);
 	}
 
-	VkBool32 enable[RENDER_COLOR_ATTACHMENTS_MAX] = {};
-	for (uint32_t i = 0; i < dynamic_params.color_write_count; i++) {
-		enable[i] = (dynamic_params.color_write_enable[i] ? VK_TRUE : VK_FALSE);
-	}
-	VulkanCmdSetColorWriteEnableEXT(g_render_ctx->GetGraphicCtx(), vk_buffer,
-	                                dynamic_params.color_write_count, enable);
+	// NOTE (macOS/MoltenVK patch): the vkCmdSetColorWriteEnableEXT call that used to sit
+	// here has been removed - see the comment above BuildGraphicsDynamicParams(). The
+	// dynamic_params.color_write_enable[] values are still computed (and still feed the
+	// pipeline cache key via static_params.color_mask in pipelineCache.cpp), they're just
+	// no longer also pushed through the (MoltenVK-unsupported) dynamic-state call here.
 }
 
 static bool DrawHasValidVertexShader(const HW::Shader* sh_ctx) {

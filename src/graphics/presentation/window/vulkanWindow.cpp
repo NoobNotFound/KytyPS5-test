@@ -282,14 +282,18 @@ static void VulkanFindPhysicalDevice(VkInstance instance, VkSurfaceKHR surface,
 		features13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
 		features13.pNext = nullptr;
 
-		VkPhysicalDeviceColorWriteEnableFeaturesEXT color_write_ext {};
-		color_write_ext.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COLOR_WRITE_ENABLE_FEATURES_EXT;
-		color_write_ext.pNext = nullptr;
-
+		// NOTE (macOS/MoltenVK patch): VK_EXT_color_write_enable is not implemented by
+		// MoltenVK at all (checked against KhronosGroup/MoltenVK source directly - the
+		// extension name does not appear anywhere in the codebase). Requiring it here
+		// unconditionally rejects every MoltenVK device, so the feature query/check for
+		// it has been removed. The equivalent behaviour (disabling writes to a render
+		// target) is still achieved statically via VkPipelineColorBlendAttachmentState
+		// .colorWriteMask, which is already derived from the same render-target-mask
+		// source - see shaders.cpp / pipelineCache.cpp.
 		VkPhysicalDeviceDepthClipControlFeaturesEXT depth_clip_control {};
 		depth_clip_control.sType =
 		    VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_CLIP_CONTROL_FEATURES_EXT;
-		depth_clip_control.pNext = &color_write_ext;
+		depth_clip_control.pNext = nullptr;
 
 		VkPhysicalDeviceVulkan12Features features12 {};
 		features12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
@@ -312,11 +316,6 @@ static void VulkanFindPhysicalDevice(VkInstance instance, VkSurfaceKHR surface,
 		    qs.transfer.size() != GraphicContext::QUEUE_UTIL_NUM ||
 		    qs.present.size() != GraphicContext::QUEUE_PRESENT_NUM) {
 			LOGF("Not enough queues\n");
-			skip_device = true;
-		}
-
-		if (color_write_ext.colorWriteEnable != VK_TRUE) {
-			LOGF("colorWriteEnable is not supported\n");
 			skip_device = true;
 		}
 
@@ -587,14 +586,11 @@ static VkDevice VulkanCreateDevice(VkPhysicalDevice physical_device, VkSurfaceKH
 		}
 	}
 
-	VkPhysicalDeviceColorWriteEnableFeaturesEXT color_write_ext {};
-	color_write_ext.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COLOR_WRITE_ENABLE_FEATURES_EXT;
-	color_write_ext.pNext = nullptr;
-	color_write_ext.colorWriteEnable = VK_TRUE;
-
+	// NOTE (macOS/MoltenVK patch): no longer requesting VK_EXT_color_write_enable - see
+	// the matching note in VulkanFindPhysicalDevice above.
 	VkPhysicalDeviceDepthClipControlFeaturesEXT depth_clip_control {};
 	depth_clip_control.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_CLIP_CONTROL_FEATURES_EXT;
-	depth_clip_control.pNext = &color_write_ext;
+	depth_clip_control.pNext = nullptr;
 	depth_clip_control.depthClipControl = VK_TRUE;
 
 	VkPhysicalDeviceVulkan12Features features12 {};
@@ -1049,10 +1045,11 @@ void VulkanCreate(WindowContext* ctx) {
 		EXIT("Could not create a Vulkan surface");
 	}
 
+	// NOTE (macOS/MoltenVK patch): VK_EXT_COLOR_WRITE_ENABLE_EXTENSION_NAME removed - not
+	// implemented by MoltenVK, and no longer required (see notes above).
 	std::vector<const char*> device_extensions = {
 	    VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_EXT_DEPTH_CLIP_ENABLE_EXTENSION_NAME,
-	    VK_EXT_DEPTH_CLIP_CONTROL_EXTENSION_NAME, VK_EXT_COLOR_WRITE_ENABLE_EXTENSION_NAME,
-	    "VK_KHR_maintenance1"};
+	    VK_EXT_DEPTH_CLIP_CONTROL_EXTENSION_NAME, "VK_KHR_maintenance1"};
 
 #ifdef KYTY_ENABLE_DEBUG_PRINTF
 	if (Config::SpirvDebugPrintfEnabled()) {

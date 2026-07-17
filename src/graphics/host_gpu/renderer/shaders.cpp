@@ -793,20 +793,17 @@ void CreatePipelineInternal(PipelineCache::GraphicsPipeline* pipeline, VkRenderP
 		                                           : color_blend_attachment[i].colorBlendOp);
 	}
 
-	VkBool32 color_write_enable[RENDER_COLOR_ATTACHMENTS_MAX] = {};
-	for (uint32_t i = 0; i < static_params.color_count; i++) {
-		color_write_enable[i] = VK_TRUE;
-	}
-
-	VkPipelineColorWriteCreateInfoEXT color_write {};
-	color_write.sType              = VK_STRUCTURE_TYPE_PIPELINE_COLOR_WRITE_CREATE_INFO_EXT;
-	color_write.pNext              = nullptr;
-	color_write.attachmentCount    = static_params.color_count;
-	color_write.pColorWriteEnables = color_write_enable;
-
+	// NOTE (macOS/MoltenVK patch): the VK_EXT_color_write_enable-based
+	// VkPipelineColorWriteCreateInfoEXT chain has been removed - MoltenVK doesn't
+	// implement that extension. It was redundant anyway: static_params.color_mask[i]
+	// (built from the same CB_TARGET_MASK/render-target-mask source, see
+	// pipelineCache.cpp) already zeroes color_blend_attachment[i].colorWriteMask above
+	// for any disabled target, and because color_mask is part of the pipeline's cache
+	// key, a render-target-mask change already produces a distinct pipeline with the
+	// correct mask baked in - the dynamic override was not adding new behaviour here.
 	VkPipelineColorBlendStateCreateInfo color_blending {};
 	color_blending.sType             = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-	color_blending.pNext             = &color_write;
+	color_blending.pNext             = nullptr;
 	color_blending.flags             = 0;
 	color_blending.logicOpEnable     = VK_FALSE;
 	color_blending.logicOp           = VK_LOGIC_OP_COPY;
@@ -890,7 +887,8 @@ void CreatePipelineInternal(PipelineCache::GraphicsPipeline* pipeline, VkRenderP
 	    VK_DYNAMIC_STATE_STENCIL_COMPARE_MASK,
 	    VK_DYNAMIC_STATE_STENCIL_REFERENCE,
 	    VK_DYNAMIC_STATE_STENCIL_WRITE_MASK,
-	    VK_DYNAMIC_STATE_COLOR_WRITE_ENABLE_EXT,
+	    // VK_DYNAMIC_STATE_COLOR_WRITE_ENABLE_EXT removed (macOS/MoltenVK patch) - not
+	    // implemented by MoltenVK; static colorWriteMask already covers this, see above.
 	};
 	const auto dynamic_states_count =
 	    static_cast<uint32_t>(sizeof(dynamic_states) / sizeof(dynamic_states[0]));
